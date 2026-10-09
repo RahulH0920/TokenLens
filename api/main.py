@@ -190,7 +190,7 @@ async def secure_api_requests(request, call_next):
         except ValueError:
             is_loopback = client_host.lower() in {"localhost", "testclient"}
 
-    current_token = os.getenv("FINOPS_API_TOKEN", API_TOKEN)
+    current_token = os.getenv("FINOPS_API_TOKEN") or API_TOKEN
     if current_token and len(current_token) < 32:
         from starlette.responses import JSONResponse
 
@@ -232,8 +232,6 @@ async def secure_api_requests(request, call_next):
         request.scope["headers"] = headers
 
     if request.method in {"POST", "PUT", "PATCH"}:
-        # Enforce the limit against received bytes too: Content-Length can be
-        # absent for chunked bodies, and must never be the only size check.
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)
@@ -242,7 +240,6 @@ async def secure_api_requests(request, call_next):
 
                 return JSONResponse(status_code=413, content={"detail": "Request body too large"})
 
-        # BaseHTTPMiddleware's cached request replays `_body` to downstream.
         request._body = bytes(body)
 
     response = await call_next(request)
