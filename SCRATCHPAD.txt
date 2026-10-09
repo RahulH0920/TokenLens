@@ -1,0 +1,197 @@
+================================================================================
+TOKENLENS — LLM FINOPS & USAGE ATTRIBUTION PLATFORM
+PROJECT SCRATCHPAD & FEATURE SPECIFICATION
+Challenge: PS-04 | Commvault Challenge | MITK AI Vision 24H Hackathon
+================================================================================
+
+LAST UPDATED: 2026-10-09
+BRANCH: rahul
+TEST STATUS: 27 / 27 Pytest Unit & Integration Tests Passing (100%)
+FINANCIAL AUDIT: All Mathematical Invariants Reconciled & Verified
+
+--------------------------------------------------------------------------------
+1. HACKATHON PROBLEM STATEMENT & JUDGING CRITERIA MAPPING
+--------------------------------------------------------------------------------
+[Problem]
+Organizations struggle to determine which teams, features, models, or users consume
+the most LLM tokens and incur the highest costs. Without reliable attribution, it
+is difficult to reconcile usage, identify waste, and make informed optimization
+decisions.
+
+[Expected Deliverables Status]
+1. Request logger or proxy with configurable attribution metadata:
+   -> COMPLETE: Implemented in core/attribution.py, config/attribution.yaml,
+      api/main.py (/api/v1/requests), and scripts/mock_proxy.py.
+2. Cost and usage calculations using supplied pricing table & dataset:
+   -> COMPLETE: Decimal fixed-point math in core/cost_engine.py with DuckDB
+      SQL views, missing price exception handling, and input/output/cached rates.
+3. Dashboard with breakdowns by team, feature, model, and time period:
+   -> COMPLETE: Executive Streamlit command center (app.py) with 6 workspaces,
+      interactive filters, Plotly heatmaps, and trend charts.
+4. Validation report comparing dashboard totals with known expected values:
+   -> COMPLETE: Independent reconciliation engine in core/reconciliation.py,
+      CLI tool scripts/run_independent_validation.py, and formal report at
+      reports/reconciliation_report.md (within 0.01% tolerance).
+
+[Judging Criteria Check]
+- Attribution: Correctly assigns team/feature/user tags with fallback rules. [MET]
+- Cost accuracy: Reconciles calculated costs with agreed pricing table. [MET]
+- Provider coverage: Real OpenAI and Gemini forwarding with usage capture into persistent DuckDB. [IMPLEMENTED]
+- Usability: Make cost drivers and usage trends easy to interpret. [MET]
+
+--------------------------------------------------------------------------------
+2. PRESENT FEATURES ALREADY BUILT & HOW THEY WORK
+--------------------------------------------------------------------------------
+
+[FEATURE 1: Configurable Attribution & Ingestion Engine]
+- Files: core/attribution.py, core/importer.py, config/attribution.yaml
+- Tools/Libraries: Pydantic v2, PyYAML, Pandas
+- Part It Plays: Ingestion entry point for raw logs and HTTP proxy requests.
+- Problems Solved: Unattributed shadow AI spend, disparate tag naming across teams
+  (e.g., "Engineering" vs "eng" vs "ENGINEERING"), and dirty or corrupted records.
+- How It Works: Extracts HTTP headers (X-Team, X-Feature, X-User, X-Env) or CSV
+  columns, normalizes casing/whitespace, applies regex alias mappings, and
+  explicitly tags missing attribution as 'unattributed' rather than dropping rows.
+- Efficiency Gain: Replaces manual spreadsheet cleaning with instant sub-millisecond
+  in-memory pipeline parsing.
+
+[FEATURE 2: Deterministic Decimal Cost Engine & Invariant Verifier]
+- Files: core/cost_engine.py, core/models.py
+- Tools/Libraries: Python Decimal (ROUND_HALF_UP), DuckDB, Pandas
+- Part It Plays: Financial core calculating deterministic spend per request.
+- Problems Solved: Floating-point precision drift ($0.00000000000004 errors), silent
+  zero charges for unpriced or newly launched models, and mathematical discrepancy.
+- How It Works: Calculates C_input = (T_in * P_in)/1e6, C_output = (T_out * P_out)/1e6,
+  C_cached = (T_cached * P_cached)/1e6. Enforces non-negotiable invariant:
+  Sum(Team Spend) == Sum(Model Spend) == Sum(Date Spend) == Grand Total.
+  Flags missing models with missing_price=True without zeroing costs.
+- Efficiency Gain: Uses DuckDB analytical views to process thousands of requests
+  in under 50ms without database overhead.
+
+[FEATURE 3: Independent Reconciliation & Formal Audit Generator]
+- Files: core/reconciliation.py, scripts/run_independent_validation.py
+- Tools/Libraries: Pydantic, JSON manifest comparison, Markdown generator
+- Part It Plays: Trust & Compliance layer verifying calculated numbers against ground truth.
+- Problems Solved: Skepticism from finance and auditing teams regarding dashboard
+  accuracy; guarantees that analytics are not silently drifting.
+- How It Works: Runs an independent computation comparing calculated actuals with
+  data/golden_validation.json against a strict 0.01% tolerance gate. Performs 10
+  hand-calculated spot-checks and outputs reports/reconciliation_report.md.
+- Efficiency Gain: Automated one-click audit replaces hours of manual accounting checks.
+
+[FEATURE 4: Executive Command Center Dashboard]
+- Files: app.py, .streamlit/config.toml
+- Tools/Libraries: Streamlit, Plotly Express/Graph Objects, Custom SaaS CSS Theme
+- Part It Plays: Central user experience for engineering leaders and finance teams.
+- Problems Solved: Information overload and lack of actionable insights into LLM spend.
+- Workspaces:
+  1. Command Center: KPI strip, spend by team, token volume, model donut, team x model heatmap.
+  2. Spend Detective: Top cost driver root causes, user ranking, attribution integrity.
+  3. Savings Lab: "What-If" interactive model-swap simulator calculating exact dollar savings.
+  4. Trend: Daily/Hourly time series, formal reconciliation report download.
+  5. Request Logs: Searchable, paginated audit ledger with secure CSV export.
+  6. Settings: Model pricing rate card, taxonomy rules, live budget guardrails table.
+- Efficiency Gain: Interactive What-If simulator allows instant ROI analysis before
+  migrating production workloads to cheaper models.
+
+[FEATURE 5: Demonstration Security & Access Control (P0 Scope)]
+- Files: api/main.py, .streamlit/config.toml
+- Tools/Libraries: FastAPI, Starlette, secrets, TrustedHostMiddleware, CORSMiddleware
+- Part It Plays: Defends API and UI from unauthorized access, timing attacks, and DoS.
+- Problems Solved: Exposure of sensitive request prompts/user IDs, rogue remote calls,
+  oversized body memory exhaustion, timing attacks on credentials.
+- How It Works: Binds Streamlit and Uvicorn strictly to 127.0.0.1; rejects remote
+  callers with HTTP 403 when FINOPS_API_TOKEN is unset; validates Bearer tokens
+  using constant-time secrets.compare_digest; caps request bodies at 64 KiB;
+  requires explicit operator confirmation checkboxes before exporting logs/audits.
+- Efficiency Gain: Secure by default; protects server resources from malicious floods.
+
+[FEATURE 6: Statistical Anomaly Detection Engine (FR-09)]
+- Files: core/anomaly_engine.py, tests/test_guardrails_anomaly.py
+- Tools/Libraries: NumPy, Pandas, Scipy statistical methods
+- Part It Plays: Early warning system flagging cost spikes, runaway loops, and prompt bloat.
+- Problems Solved: Unexpected "bill shock" caused by runaway recursive agent loops or
+  accidental context window blowups (oversized system prompt injections).
+- How It Works:
+  1. Cost Spikes: Evaluates Z-scores per request; flags items > 3.0 sigma as anomalies.
+  2. Prompt Bloat: Evaluates Upper IQR Fences (Q75 + 3.0*IQR); detects abnormal prompt bloat.
+  3. Runaway Users: Detects user concentration where a single user drives >20% of spend.
+- Efficiency Gain: Proactive notification prevents runaway costs before monthly billing.
+
+[FEATURE 7: FinOps Budget Guardrails & Policy Enforcement (FR-10)]
+- Files: core/guardrails.py, api/main.py (/api/v1/guardrails, /api/v1/guardrails/check)
+- Tools/Libraries: Pydantic v2, Decimal, FastAPI
+- Part It Plays: Pre-flight and post-flight spend policy governance per team.
+- Problems Solved: One department consuming 90% of the company's shared AI budget.
+- How It Works: Tracks team-level monthly quotas, warning thresholds (80%), and
+  critical limits (100%). Provides /api/v1/guardrails/check to evaluate potential
+  requests and return ALLOW, WARN, or BLOCK before calling expensive LLM APIs.
+- Efficiency Gain: Shifts FinOps from reactive end-of-month reporting to real-time
+  proactive cost prevention.
+
+--------------------------------------------------------------------------------
+3. WHAT SHOULD BE DONE NEXT (ROADMAP TO WIN HACKATHON JUDGING)
+--------------------------------------------------------------------------------
+
+[COMPLETED ITEM 1: OpenAI + Gemini Provider Usage Proxy]
+- Target Files: scripts/mock_proxy.py, core/proxy_adapter.py, tests/test_proxy.py
+- Judging Criterion Addressed: "Provider coverage: Support at least two simulated or
+  real provider formats where feasible."
+- Problem It Solves: Real-world organizations use multiple LLM providers (e.g.,
+  OpenAI GPT-4o Mini and Gemini 2.5 Flash). Each provider uses different
+  payload schemas:
+  - OpenAI: /v1/chat/completions -> {"messages": [...], "model": "gpt-4o"}
+    Response: {"choices": [{"message": ...}], "usage": {"prompt_tokens", "completion_tokens"}}
+  - Gemini: /v1beta/models/{model}:generateContent -> {"contents": [...]}.
+    Response usage is returned in usageMetadata.
+- What Needs To Be Done:
+  The proxy forwards real requests using OPENAI_API_KEY and GEMINI_API_KEY (or
+  GOOGLE_API_KEY), extracts provider usage, calculates costs, adds attribution
+  headers, and persists usage rows in data/tokenlens_usage.duckdb.
+- Model/Service Integration:
+  - OpenAI endpoint: /v1/chat/completions
+  - Gemini endpoint: /v1beta/models/{model}:generateContent
+- Efficiency Impact: Enables zero-code-change drop-in proxy replacement by setting
+  their provider base URL to TokenLens.
+
+[NEXT ITEM 2: Semantic Prompt Cache & Prefix Redundancy Analyzer]
+- Target Files: core/cache_analyzer.py, app.py
+- Problem It Solves: Up to 50-80% of enterprise LLM spend is burned on redundant,
+  repetitive system prompts sent thousands of times without prompt caching.
+- What Needs To Be Done:
+  Analyze input token repetition, calculate potential savings from OpenAI/Anthropic
+  prompt caching rates ($0.30 vs $3.00 per 1M tokens), and highlight duplicate
+  prompt prefixes across teams.
+- Model/Service Integration: Model rate card cached token tier (cached_usd_per_1m).
+- Efficiency Impact: Identifies immediate 50-70% margin improvements without
+  switching models.
+
+[NEXT ITEM 3: Pre-Flight Token Estimator (Deterministic BPE Tokenizer)]
+- Target Files: core/tokenizer.py
+- Problem It Solves: Character count heuristics (len/4) can have 15-25% estimation
+  error, leading to inaccurate pre-flight cost estimations.
+- What Needs To Be Done:
+  Integrate exact BPE token counting (tiktoken for OpenAI / cl100k_base / o200k_base)
+  for exact pre-flight cost calculation before making the API call.
+- Efficiency Impact: 100% deterministic pre-flight cost predictability.
+
+[NEXT ITEM 4: Webhook & Slack Incident Dispatcher]
+- Target Files: core/notifications.py, api/main.py
+- Problem It Solves: Anomaly alerts currently require checking the dashboard.
+- What Needs To Be Done:
+  Send automated JSON webhook payloads (compatible with Slack, Discord, PagerDuty)
+  when a CRITICAL anomaly or BUDGET BREACH occurs.
+
+--------------------------------------------------------------------------------
+4. ARCHITECTURE & EFFICIENCY MATRIX
+--------------------------------------------------------------------------------
+Component                | Primary Tool/Engine       | Key Efficiency Technique
+-------------------------+---------------------------+--------------------------
+Attribution Parser       | PyYAML + Regex Aliases    | Single-pass normalization
+Cost Engine              | Python Decimal + DuckDB   | Fixed-point math, 0 drift
+Reconciliation Engine    | JSON Expected Manifest    | Vectorized comparison
+Anomaly Detector         | NumPy Z-Scores + IQR      | Dynamic baseline fencing
+Budget Guardrails        | Pydantic v2 + REST API    | O(1) in-memory thresholding
+Interactive UI           | Streamlit + Plotly        | Cached frames & session state
+Backend API              | FastAPI + Uvicorn + httpx | Async ASGI, streaming body cap
+================================================================================

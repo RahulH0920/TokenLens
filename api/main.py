@@ -29,6 +29,8 @@ from core.cost_engine import CostEngine
 from core.importer import DataImporter
 from core.models import RequestRecord
 from core.reconciliation import ReconciliationEngine
+from core.anomaly_engine import AnomalyDetector
+from core.guardrails import GuardrailEngine
 
 DATA_DIR = BASE_DIR / "data"
 DEPLOYMENT_ENV = os.getenv("FINOPS_ENV", "development").strip().lower()
@@ -90,6 +92,8 @@ engine.load_pricing_records(pricing_records)
 priced_records = engine.process_requests(request_records)
 seed_priced_records = tuple(priced_records)
 data_lock = RLock()
+anomaly_detector = AnomalyDetector()
+guardrail_engine = GuardrailEngine()
 
 
 class NewRequest(BaseModel):
@@ -210,10 +214,25 @@ async def secure_api_requests(request, call_next):
 
             return JSONResponse(status_code=413, content={"detail": "Request body too large"})
 
-    if request.method in {"POST", "PUT", "PATCH"} and content_length is None:
-        from starlette.responses import JSONResponse
+    if request.method in {"POST", "PUT", "PATCH"} and not request.headers.get("content-type"):
+        headers = list(request.scope["headers"])
+        headers.append((b"content-type", b"application/json"))
+        request.scope["headers"] = headers
 
-        return JSONResponse(status_code=411, content={"detail": "Content-Length is required"})
+    if request.method in {"POST", "PUT", "PATCH"}:
+        # Enforce the limit against received bytes too: Content-Length can be
+        # absent for chunked bodies, and must never be the only size check.
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > MAX_BODY_BYTES:
+                from starlette.responses import JSONResponse
+
+                return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+
+        # BaseHTTPMiddleware's cached request replays `_body` to downstream.
+        request._body = bytes(body)
+
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -406,3 +425,47 @@ def get_reconciliation() -> dict:
         "checks": [check.model_dump(mode="json") for check in checks],
         "ingestion": ingestion_stats,
     }
+
+
+class GuardrailCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    team: str = Field(min_length=1, max_length=100)
+    estimated_cost_usd: float = Field(ge=0.0, le=100000.0)
+
+
+@app.get("/api/v1/anomalies")
+def get_anomalies(
+    severity: Literal["ALL", "CRITICAL", "WARNING", "INFO"] = "ALL",
+    anomaly_type: Literal["ALL", "COST_SPIKE", "TOKEN_BLOAT", "RUNAWAY_RATE"] = "ALL",
+) -> list[dict]:
+    frame = _frame()
+    alerts = anomaly_detector.get_all_anomalies(frame)
+    if severity != "ALL":
+        alerts = [a for a in alerts if a.severity == severity]
+    if anomaly_type != "ALL":
+        alerts = [a for a in alerts if a.anomaly_type == anomaly_type]
+    return [a.model_dump(mode="json") for a in alerts]
+
+
+@app.get("/api/v1/guardrails")
+def get_guardrails() -> list[dict]:
+    frame = _frame()
+    return guardrail_engine.get_summary_status(frame)
+
+
+@app.post("/api/v1/guardrails/check")
+def check_guardrails(body: GuardrailCheckRequest) -> dict:
+    from decimal import Decimal
+
+    frame = _frame()
+    team_spend = (
+        frame[frame["team"].astype(str) == body.team]["total_cost_usd"].sum()
+        if not frame.empty
+        else 0.0
+    )
+    res = guardrail_engine.evaluate_request(
+        team=body.team,
+        estimated_cost=Decimal(str(body.estimated_cost_usd)),
+        current_team_spend=Decimal(str(team_spend)),
+    )
+    return res.model_dump(mode="json")

@@ -47,6 +47,7 @@ class CostEngine:
             CREATE TABLE IF NOT EXISTS requests (
                 request_id VARCHAR PRIMARY KEY,
                 ts TIMESTAMP NOT NULL,
+                provider VARCHAR NOT NULL DEFAULT 'openai',
                 model VARCHAR NOT NULL,
                 input_tokens BIGINT NOT NULL,
                 output_tokens BIGINT NOT NULL,
@@ -202,12 +203,13 @@ class CostEngine:
         for pr in priced_records:
             self.conn.execute("""
                 INSERT INTO requests (
-                    request_id, ts, model, input_tokens, output_tokens, cached_tokens,
+                    request_id, ts, provider, model, input_tokens, output_tokens, cached_tokens,
                     latency_ms, status, team, feature, user_id, env, source, is_unattributed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
                 pr.request_id,
                 pr.timestamp_utc,
+                pr.provider,
                 pr.model,
                 pr.input_tokens,
                 pr.output_tokens,
@@ -223,6 +225,35 @@ class CostEngine:
             ])
 
         return priced_records
+
+    def append_priced_request(self, request: PricedRequest) -> None:
+        """Append one priced request to the live DuckDB ledger without resetting it."""
+        self.conn.execute(
+            """
+            INSERT INTO requests (
+                request_id, ts, provider, model, input_tokens, output_tokens,
+                cached_tokens, latency_ms, status, team, feature, user_id, env,
+                source, is_unattributed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                request.request_id,
+                request.timestamp_utc,
+                request.provider,
+                request.model,
+                request.input_tokens,
+                request.output_tokens,
+                request.cached_tokens,
+                request.latency_ms,
+                request.status,
+                request.team,
+                request.feature,
+                request.user_id,
+                request.env,
+                request.source,
+                request.is_unattributed,
+            ],
+        )
 
     def get_priced_dataframe(self, priced_records: List[PricedRequest]) -> pd.DataFrame:
         """Convert list of priced records to a structured Pandas DataFrame with float fields for plotting."""

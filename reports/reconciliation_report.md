@@ -6,7 +6,7 @@
 - **Source Records Ingested:** 1,208
 - **Valid Processed Records:** 1,200
 - **Pricing Table Version:** `v2026.10`
-- **Audit Timestamp:** `2026-10-09T17:24:10Z`
+- **Audit Timestamp:** `2026-10-09T18:03:36Z`
 
 ## 2. Methodology & Guarantees
 - **Independent Recompute:** Expected values computed independently via separate test manifest, never sharing engine cache or view code.

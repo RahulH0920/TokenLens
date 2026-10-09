@@ -8,5 +8,11 @@ font = "sans serif"
 [server]
 headless = true
 address = "127.0.0.1"
-enableCORS = false
+enableCORS = true
+corsAllowedOrigins = [
+    "http://localhost:8501",
+    "http://127.0.0.1:8501",
+    "http://localhost:8502",
+    "http://127.0.0.1:8502",
+]
 enableXsrfProtection = true

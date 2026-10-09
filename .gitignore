@@ -47,6 +47,8 @@ Thumbs.db
 
 # Logs and runtime artifacts
 *.log
+data/*.duckdb
+data/*.duckdb.wal
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

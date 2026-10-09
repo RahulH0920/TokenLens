@@ -72,3 +72,37 @@ class ValidationCheckResult(BaseModel):
     tolerance: str
     status: str  # 'PASS' | 'FAIL' | 'WARNING'
     details: str
+
+
+class AnomalyAlert(BaseModel):
+    anomaly_id: str
+    timestamp_utc: datetime
+    anomaly_type: str  # 'COST_SPIKE' | 'TOKEN_BLOAT' | 'RUNAWAY_RATE'
+    severity: str  # 'CRITICAL' | 'WARNING' | 'INFO'
+    metric: str
+    actual_value: float
+    expected_baseline: float
+    z_score: float
+    team: str = "unattributed"
+    user_id: str = "unknown_user"
+    request_id: Optional[str] = None
+    description: str
+    status: str = "ACTIVE"
+
+
+class BudgetPolicy(BaseModel):
+    team: str
+    monthly_budget_usd: Decimal
+    warning_threshold_pct: float = 80.0
+    critical_threshold_pct: float = 100.0
+    enforcement_action: str = "WARN"  # 'WARN' | 'BLOCK' | 'NOTIFY'
+
+
+class GuardrailEvaluationResult(BaseModel):
+    allowed: bool
+    action: str  # 'ALLOW' | 'WARN' | 'BLOCK'
+    team: str
+    current_spend_usd: Decimal
+    budget_limit_usd: Decimal
+    utilization_pct: float
+    message: str

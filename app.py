@@ -32,6 +32,8 @@ from core.attribution import AttributionParser
 from core.cost_engine import CostEngine
 from core.importer import DataImporter
 from core.reconciliation import ReconciliationEngine
+from core.anomaly_engine import AnomalyDetector
+from core.guardrails import GuardrailEngine
 
 # Streamlit Page Setup
 st.set_page_config(
@@ -859,6 +861,61 @@ elif active_view == "Spend Detective":
                     column_config={"total_cost_usd": st.column_config.NumberColumn("Cost", format="$%.6f")}
                 )
 
+        # 4. Statistical Anomaly & Outlier Triage Feed
+        st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.5rem 0 1rem;'>", unsafe_allow_html=True)
+        st.markdown("### 4. Real-Time Anomaly & Outlier Triage")
+        st.caption("Automated statistical detection of cost spikes, prompt-token bloat, and runaway user concentration.")
+
+        detector = AnomalyDetector()
+        detected_anomalies = detector.get_all_anomalies(filtered_df)
+
+        if not detected_anomalies:
+            st.success("✅ No statistical anomalies or prompt bloat detected across the active dataset.")
+        else:
+            crit_count = sum(1 for a in detected_anomalies if a.severity == "CRITICAL")
+            warn_count = sum(1 for a in detected_anomalies if a.severity == "WARNING")
+
+            anom_c1, anom_c2, anom_c3 = st.columns(3)
+            with anom_c1:
+                st.markdown(f"""
+                <div class="saas-card">
+                    <div class="saas-kpi-label">Active Anomalies</div>
+                    <div class="saas-kpi-value">{len(detected_anomalies)}</div>
+                    <div class="saas-kpi-sub">Statistical deviations flagged</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with anom_c2:
+                st.markdown(f"""
+                <div class="saas-card">
+                    <div class="saas-kpi-label">Critical Alerts</div>
+                    <div class="saas-kpi-value" style="color: #DC2626;">{crit_count}</div>
+                    <div class="saas-kpi-sub">Severe outlier magnitude (>4σ)</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with anom_c3:
+                st.markdown(f"""
+                <div class="saas-card">
+                    <div class="saas-kpi-label">Warnings</div>
+                    <div class="saas-kpi-value" style="color: #D97706;">{warn_count}</div>
+                    <div class="saas-kpi-sub">Moderate statistical divergence</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            anomaly_table_data = [
+                {
+                    "Severity": "🔴 CRITICAL" if a.severity == "CRITICAL" else "🟡 WARNING",
+                    "Type": a.anomaly_type.replace("_", " "),
+                    "Team": a.team,
+                    "User": a.user_id,
+                    "Observed": f"${a.actual_value:.4f}" if "cost" in a.metric or "spend" in a.metric else f"{int(a.actual_value):,}",
+                    "Expected": f"${a.expected_baseline:.4f}" if "cost" in a.metric or "spend" in a.metric else f"{int(a.expected_baseline):,}",
+                    "Deviation": f"{a.z_score:.1f}σ",
+                    "Root Cause": a.description,
+                }
+                for a in detected_anomalies
+            ]
+            st.dataframe(pd.DataFrame(anomaly_table_data), use_container_width=True, hide_index=True)
+
 
 # =========================================================================
 # 3. SAVINGS LAB (MODEL-SWAP SIMULATOR)
@@ -1437,6 +1494,22 @@ elif active_view == "Settings":
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+        guardrail_engine = GuardrailEngine()
+        team_statuses = guardrail_engine.get_summary_status(df)
+        st.markdown("<div style='font-size: 0.85rem; font-weight: 600; color: #374151; margin-bottom: 6px;'>Team Quota Guardrails:</div>", unsafe_allow_html=True)
+        status_df = pd.DataFrame([
+            {
+                "Team": s["team"].capitalize(),
+                "Spend": f"${s['current_spend_usd']:.2f}",
+                "Budget": f"${s['monthly_budget_usd']:.2f}",
+                "Usage": f"{s['utilization_pct']:.1f}%",
+                "Status": "🟢 HEALTHY" if s["state"] == "HEALTHY" else "🟡 WARNING" if s["state"] == "WARNING" else "🔴 CRITICAL",
+                "Action": s["enforcement_action"],
+            }
+            for s in team_statuses
+        ])
+        st.dataframe(status_df, use_container_width=True, hide_index=True)
 
         tolerance_input = st.selectbox("Reconciliation Tolerance Limit", ["±$0.01 (0.01% standard)", "±$0.05", "Exact (0.00%)"], index=0)
         alert_email = st.text_input("FinOps Notification Email", value="finops-alerts@acme.ai")

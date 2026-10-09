@@ -16,6 +16,8 @@ This repository provides the complete, production-grade **Base Prototype** adher
 - **FR-05 (Filter & Request Ledger Drill-Down):** Full audit trail down to individual request records with CSV export capability.
 - **FR-06 (Independent Financial Reconciliation):** Independent recomputation engine comparing calculated actuals with golden test manifests within a 0.01% tolerance.
 - **Bonus Wow-Factors (FR-07, FR-08):** "Spend Detective" root-cause analysis and an interactive "Model-Swap Savings Simulator".
+- **FR-09 (Statistical Anomaly Detection):** Z-score and IQR-fence outlier detection flagging cost spikes, prompt-token bloat, and runaway user concentration.
+- **FR-10 (Budget Guardrails & Policy Enforcement):** Per-team financial budgets, dynamic utilization tracking, and pre-flight evaluation (ALLOW, WARN, BLOCK).
 
 ---
 
@@ -129,14 +131,52 @@ Local CORS is enabled for Streamlit on port 8501 and common React dev servers on
 | `GET /api/v1/requests` | Filterable, paginated request ledger |
 | `POST /api/v1/requests` | Validate, price, and add one request to the running demo |
 | `GET /api/v1/reconciliation` | Expected-versus-actual checks for the seeded dataset |
+| `GET /api/v1/anomalies` | Statistical anomalies (cost spikes, token bloat, runaway users) |
+| `GET /api/v1/guardrails` | Live team budget utilization and health states |
+| `POST /api/v1/guardrails/check` | Pre-flight request evaluation against team quotas (ALLOW/WARN/BLOCK) |
 
 `POST /api/v1/requests` accepts `request_id`, `model`, `input_tokens`, and `output_tokens`; timestamp, provider, attribution, status, and cached tokens are optional. Duplicate IDs return HTTP 409. Requests added through this endpoint are held in memory and are cleared when the API restarts.
 
-### 5. (Optional) Run the legacy mock proxy
-```bash
+### 5. Run the OpenAI + Gemini usage proxy
+
+The local proxy forwards requests to the real provider APIs and captures the token usage returned by each provider. It does not fetch historical usage for calls made outside TokenLens. Set keys in the shell environment; never put them in source, Streamlit settings, or the DuckDB file.
+
+```powershell
+$env:OPENAI_API_KEY = "<your OpenAI API key>"
+$env:GEMINI_API_KEY = "<your Gemini API key>"
 python scripts/mock_proxy.py
 ```
-Runs the OpenAI-style mock completion endpoint on `http://127.0.0.1:8000`; it is separate from the dashboard API above.
+
+The proxy listens on `http://127.0.0.1:8000`, separate from the dashboard API above. Live requests can incur charges on your provider accounts. It uses `FINOPS_DUCKDB_PATH` when set; otherwise it creates `data/tokenlens_usage.duckdb`. The database is ignored by Git. On an empty database, it imports the supplied sample request data once, then appends live API usage. Restarting the proxy preserves records. The `provider_host` column identifies whether a record came from `api.openai.com`, `generativelanguage.googleapis.com`, or the sample CSV.
+
+| Provider | Request endpoint | Example priced model |
+| --- | --- | --- |
+| OpenAI Chat Completions | `POST /v1/chat/completions` | `gpt-4o-mini` |
+| Gemini `generateContent` | `POST /v1beta/models/{model}:generateContent` | `gemini-2.5-flash` |
+
+Both endpoints accept `X-Team`, `X-Feature`, `X-User`, and `X-Env` attribution headers. Successful responses retain the provider's native body and add a `finops_attribution` object plus `X-FinOps-Cost-USD` and `X-FinOps-Team` headers. The ledger stores usage and attribution metadata, not prompts or API keys. OpenAI and Gemini prompt usage includes cached tokens; TokenLens separates cached tokens from regular input before applying the cached rate. Gemini thinking tokens are included with output tokens. Missing rates are marked `missing_price` and cost is not reported as a valid zero.
+
+Inspect the local database through the proxy:
+
+```text
+GET /usage/summary
+GET /usage/breakdown?by=provider
+GET /usage/requests?provider=google
+```
+
+Costs use the rates in `data/model_pricing.csv`; they are TokenLens estimates of token charges and do not include provider-side free tiers, discounts, taxes, or tool charges. Review the provider's current rates before using the totals for billing. The included `gemini-2.5-flash` paid-tier rates follow Google's published text-token schedule; update the CSV if your account uses another model or service tier. See [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat) and [Gemini generateContent](https://ai.google.dev/api/generate-content).
+
+Example requests:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" -H "X-Team: engineering" -H "X-Feature: code-review" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Explain a hash map briefly."}]}'
+
+curl http://127.0.0.1:8000/v1beta/models/gemini-2.5-flash:generateContent \
+  -H "Content-Type: application/json" -H "X-Team: analytics" -H "X-Feature: summarisation" \
+  -d '{"contents":[{"role":"user","parts":[{"text":"Explain a hash map briefly."}]}]}'
+```
 
 ### 6. (Optional) Verify an individual DuckDB client against PostgreSQL
 
