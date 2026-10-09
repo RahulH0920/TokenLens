@@ -1,0 +1,20 @@
+{
+  "dataset_name": "sample_requests.csv",
+  "total_source_rows": 1208,
+  "total_requests": 1200,
+  "total_input_tokens": 4711994,
+  "total_output_tokens": 1006027,
+  "total_cached_tokens": 420691,
+  "total_cost_usd": 14.3633,
+  "expected_rejected_rows": 8,
+  "expected_duplicate_ids": 5,
+  "expected_missing_price_records": 6,
+  "team_costs": {
+    "engineering": 2.9325,
+    "support": 2.4617,
+    "product": 2.6586,
+    "research": 3.1263,
+    "marketing": 2.183,
+    "unattributed": 1.0012
+  }
+}
