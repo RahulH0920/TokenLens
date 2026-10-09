@@ -1,0 +1,33 @@
+# Attribution configuration for LLM FinOps
+version: "1.0"
+
+defaults:
+  team: "unattributed"
+  feature: "unassigned"
+  user_id: "unknown_user"
+  env: "production"
+
+header_mappings:
+  "x-team": "team"
+  "x-feature": "feature"
+  "x-user": "user_id"
+  "x-user-id": "user_id"
+  "x-environment": "env"
+  "x-env": "env"
+
+normalization:
+  trim_whitespace: true
+  lowercase_dimensions: true
+  replace_spaces_with_hyphens: true
+
+# Normalization mapping for standard feature taxonomy
+feature_aliases:
+  "codereview": "code-review"
+  "code_review": "code-review"
+  "code-review-v2": "code-review"
+  "chat": "agent-chat"
+  "agent_chat": "agent-chat"
+  "search": "doc-search"
+  "document_search": "doc-search"
+  "summary": "summarisation"
+  "summarization": "summarisation"

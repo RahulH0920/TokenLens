@@ -80,8 +80,10 @@ def run_audit():
             "model": r.model,
             "input_tokens": r.input_tokens,
             "output_tokens": r.output_tokens,
+            "cached_tokens": r.cached_tokens,
             "in_rate": float(p.input_usd_per_1m),
             "out_rate": float(p.output_usd_per_1m),
+            "cached_rate": float(p.cached_usd_per_1m),
             "expected_cost": expected_cost,
             "actual_cost": float(r.total_cost_usd)
         })

@@ -13,10 +13,10 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 from threading import RLock
-from typing import Literal
+from typing import Literal, Optional, List, Dict, Any
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict, Field
@@ -98,8 +98,8 @@ class NewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str = Field(min_length=1, max_length=200)
-    timestamp_utc: datetime | None = None
-    timestamp: str | None = None
+    timestamp_utc: Optional[datetime] = None
+    timestamp: Optional[str] = None
     team: str = "unattributed"
     feature: str = "unassigned"
     user_id: str = "unknown_user"
@@ -119,15 +119,15 @@ def _frame() -> pd.DataFrame:
 
 def _filtered_frame(
     *,
-    start_date: date | None = None,
-    end_date: date | None = None,
-    team: str | None = None,
-    feature: str | None = None,
-    model: str | None = None,
-    user_id: str | None = None,
-    provider: str | None = None,
-    status: str | None = None,
-    env: str | None = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    team: Optional[str] = None,
+    feature: Optional[str] = None,
+    model: Optional[str] = None,
+    user_id: Optional[str] = None,
+    provider: Optional[str] = None,
+    status: Optional[str] = None,
+    env: Optional[str] = None,
 ) -> pd.DataFrame:
     frame = _frame()
     if start_date:
@@ -204,15 +204,15 @@ def get_filter_options() -> dict:
 
 @app.get("/api/v1/summary")
 def get_summary(
-    start_date: date | None = None,
-    end_date: date | None = None,
-    team: str | None = None,
-    feature: str | None = None,
-    model: str | None = None,
-    user_id: str | None = None,
-    provider: str | None = None,
-    status: str | None = None,
-    env: str | None = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    team: Optional[str] = None,
+    feature: Optional[str] = None,
+    model: Optional[str] = None,
+    user_id: Optional[str] = None,
+    provider: Optional[str] = None,
+    status: Optional[str] = None,
+    env: Optional[str] = None,
 ) -> dict:
     if start_date and end_date and start_date > end_date:
         raise HTTPException(status_code=422, detail="start_date must be on or before end_date")
@@ -226,9 +226,13 @@ def get_summary(
     unattributed = frame[frame["is_unattributed"]]
     return {
         "total_spend_usd": round(float(spend), 6),
+        "total_input_cost_usd": round(float(frame["input_cost_usd"].sum()), 6),
+        "total_output_cost_usd": round(float(frame["output_cost_usd"].sum()), 6),
+        "total_cached_cost_usd": round(float(frame["cached_cost_usd"].sum()), 6),
         "total_requests": int(len(frame)),
         "total_input_tokens": int(frame["input_tokens"].sum()),
         "total_output_tokens": int(frame["output_tokens"].sum()),
+        "total_cached_tokens": int(frame["cached_tokens"].sum()),
         "average_cost_per_request_usd": round(float(spend / priced_count), 6) if priced_count else 0,
         "priced_requests": priced_count,
         "unattributed_requests": int(len(unattributed)),
@@ -239,16 +243,16 @@ def get_summary(
 
 @app.get("/api/v1/breakdown")
 def get_breakdown(
-    by: Literal["team", "feature", "model", "user_id", "date"] = "team",
-    start_date: date | None = None,
-    end_date: date | None = None,
-    team: str | None = None,
-    feature: str | None = None,
-    model: str | None = None,
-    user_id: str | None = None,
-    provider: str | None = None,
-    status: str | None = None,
-    env: str | None = None,
+    by: Literal["team", "department", "feature", "model", "user_id", "user", "date"] = "team",
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    team: Optional[str] = None,
+    feature: Optional[str] = None,
+    model: Optional[str] = None,
+    user_id: Optional[str] = None,
+    provider: Optional[str] = None,
+    status: Optional[str] = None,
+    env: Optional[str] = None,
 ) -> list[dict]:
     frame = _filtered_frame(
         start_date=start_date, end_date=end_date, team=team,
@@ -258,6 +262,10 @@ def get_breakdown(
     if by == "date":
         frame = frame.assign(date=frame["timestamp_utc"].dt.date.astype(str))
         group_column = "date"
+    elif by == "department":
+        group_column = "team"
+    elif by == "user":
+        group_column = "user_id"
     else:
         group_column = by
     grouped = frame.groupby(group_column, dropna=False).agg(
@@ -265,6 +273,8 @@ def get_breakdown(
         request_count=("request_id", "count"),
         input_tokens=("input_tokens", "sum"),
         output_tokens=("output_tokens", "sum"),
+        cached_tokens=("cached_tokens", "sum"),
+        cached_cost_usd=("cached_cost_usd", "sum"),
         missing_pricing_requests=("missing_price", "sum"),
     ).reset_index().sort_values("cost_usd", ascending=False)
     return _request_items(grouped)
@@ -272,15 +282,15 @@ def get_breakdown(
 
 @app.get("/api/v1/requests")
 def get_requests(
-    start_date: date | None = None,
-    end_date: date | None = None,
-    team: str | None = None,
-    feature: str | None = None,
-    model: str | None = None,
-    user_id: str | None = None,
-    provider: str | None = None,
-    status: str | None = None,
-    env: str | None = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+    team: Optional[str] = None,
+    feature: Optional[str] = None,
+    model: Optional[str] = None,
+    user_id: Optional[str] = None,
+    provider: Optional[str] = None,
+    status: Optional[str] = None,
+    env: Optional[str] = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
@@ -350,9 +360,27 @@ def add_request(body: NewRequest) -> dict:
         "model": priced.model,
         "input_cost_usd": str(priced.input_cost_usd),
         "output_cost_usd": str(priced.output_cost_usd),
+        "cached_cost_usd": str(priced.cached_cost_usd),
         "total_cost_usd": str(priced.total_cost_usd),
         "missing_price": priced.missing_price,
         "persistence": "process_memory_only",
+    }
+
+
+@app.get("/api/v1/exceptions")
+def get_exceptions() -> dict:
+    """Return quarantined duplicate requests, rejected records, and unpriced model exceptions."""
+    frame = _frame()
+    unpriced_records = frame[frame["missing_price"]]
+    return {
+        "duplicate_requests_count": ingestion_stats.get("duplicate_count", 0),
+        "duplicate_records": [
+            r for r in rejected_records if "duplicate" in r.get("reason", "").lower()
+        ],
+        "rejected_records_count": ingestion_stats.get("rejected_rows", 0),
+        "rejected_records": rejected_records,
+        "missing_pricing_count": int(len(unpriced_records)),
+        "missing_pricing_records": _request_items(unpriced_records),
     }
 
 
@@ -373,4 +401,76 @@ def get_reconciliation() -> dict:
         "overall_status": "FAIL" if any(check.status == "FAIL" for check in checks) else "PASS",
         "checks": [check.model_dump(mode="json") for check in checks],
         "ingestion": ingestion_stats,
+    }
+
+
+@app.get("/api/v1/budgets")
+def get_budgets() -> dict:
+    """Return department budget allocations, current utilization, and threshold alert statuses."""
+    frame = _frame()
+    return engine.get_budget_utilization(frame)
+
+
+@app.get("/api/v1/insights")
+def get_insights() -> dict:
+    """Return cost-driver root cause insights, model concentration, and prompt efficiency anomalies."""
+    frame = _frame()
+    return engine.get_cost_driver_insights(frame)
+
+
+@app.get("/api/v1/recommendations")
+def get_recommendations() -> list[dict]:
+    """Return data-backed FinOps optimization recommendations with audited ROI projections."""
+    frame = _frame()
+    return engine.get_optimization_recommendations(frame)
+
+
+@app.post("/api/v1/ingest/provider")
+async def ingest_provider_payload(
+    request: Request,
+    format: Optional[str] = Query(default=None, description="Explicit provider format hint: 'openai', 'anthropic', 'google', 'simulated'"),
+) -> dict:
+    """Accept and normalize raw LLM provider payload (OpenAI, Anthropic, Google, Simulated) into priced RequestRecord."""
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
+
+    headers = {
+        "x-team": request.headers.get("x-team"),
+        "x-feature": request.headers.get("x-feature"),
+        "x-user": request.headers.get("x-user") or request.headers.get("x-user-id"),
+        "x-env": request.headers.get("x-env") or request.headers.get("x-environment"),
+    }
+
+    try:
+        record, detected_fmt = importer.parse_provider_payload(payload, format_hint=format, headers=headers)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Failed to parse provider payload: {exc}")
+
+    priced = engine.calculate_request_cost(record)
+    with data_lock:
+        if any(r.request_id == record.request_id for r in priced_records):
+            raise HTTPException(status_code=409, detail=f"Duplicate request_id '{record.request_id}'")
+        if len(priced_records) >= MAX_MEMORY_REQUESTS:
+            raise HTTPException(status_code=429, detail="In-memory request limit reached for this session")
+        priced_records.append(priced)
+
+    return {
+        "status": "success",
+        "detected_provider_format": detected_fmt,
+        "request_id": priced.request_id,
+        "team": priced.team,
+        "feature": priced.feature,
+        "user_id": priced.user_id,
+        "provider": priced.provider,
+        "model": priced.model,
+        "input_tokens": priced.input_tokens,
+        "output_tokens": priced.output_tokens,
+        "cached_tokens": priced.cached_tokens,
+        "input_cost_usd": str(priced.input_cost_usd),
+        "output_cost_usd": str(priced.output_cost_usd),
+        "cached_cost_usd": str(priced.cached_cost_usd),
+        "total_cost_usd": str(priced.total_cost_usd),
+        "missing_price": priced.missing_price,
     }

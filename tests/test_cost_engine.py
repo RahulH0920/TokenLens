@@ -106,3 +106,85 @@ def test_invariants_verification(sample_engine):
     assert inv_ok is True
     assert abs(stats["grand_total"] - stats["team_sum"]) < 0.0001
     assert abs(stats["grand_total"] - stats["model_sum"]) < 0.0001
+
+
+def test_cached_token_cost_calculation(sample_engine):
+    """Verify that cached tokens are priced at the designated cached rate and add to total cost."""
+    req = RequestRecord(
+        request_id="req_cached_test_01",
+        timestamp_utc=datetime(2026, 3, 15, 14, 0, 0),
+        team="research",
+        feature="agent-chat",
+        user_id="user_77",
+        model="example-model",
+        input_tokens=10000,
+        output_tokens=2000,
+        cached_tokens=4000,
+        status="success"
+    )
+
+    priced = sample_engine.calculate_request_cost(req)
+
+    # In: 10,000 * 2.00 / 1M = 0.020000
+    # Out: 2,000 * 8.00 / 1M = 0.016000
+    # Cached: 4,000 * 0.50 / 1M = 0.002000
+    # Total = 0.038000
+    assert priced.input_cost_usd == Decimal("0.020000")
+    assert priced.output_cost_usd == Decimal("0.016000")
+    assert priced.cached_cost_usd == Decimal("0.002000")
+    assert priced.total_cost_usd == Decimal("0.038000")
+    assert priced.missing_price is False
+
+
+def test_duckdb_view_cached_and_missing_pricing(sample_engine):
+    """Verify DuckDB view request_costs matches decimal logic for cached tokens and missing prices."""
+    reqs = [
+        RequestRecord(
+            request_id="req_valid",
+            timestamp_utc=datetime(2026, 3, 1, 10, 0, 0),
+            team="engineering",
+            feature="code-review",
+            user_id="u1",
+            model="example-model",
+            input_tokens=5000,
+            output_tokens=1000,
+            cached_tokens=2000,
+            status="success"
+        ),
+        RequestRecord(
+            request_id="req_unpriced",
+            timestamp_utc=datetime(2026, 3, 1, 11, 0, 0),
+            team="product",
+            feature="doc-search",
+            user_id="u2",
+            model="unpriced-model-xyz",
+            input_tokens=1000,
+            output_tokens=500,
+            cached_tokens=0,
+            status="success"
+        )
+    ]
+    priced = sample_engine.process_requests(reqs)
+    df = sample_engine.get_priced_dataframe(priced)
+
+    # Check missing pricing summary
+    summary = sample_engine.get_missing_pricing_summary(df)
+    assert summary["count"] == 1
+    assert "unpriced-model-xyz" in summary["models"]
+
+    # Check DuckDB SQL view
+    row = sample_engine.conn.execute("""
+        SELECT 
+            SUM(input_cost_usd), SUM(output_cost_usd), SUM(cached_cost_usd), SUM(total_cost_usd),
+            SUM(CASE WHEN missing_price THEN 1 ELSE 0 END)
+        FROM request_costs
+    """).fetchone()
+
+    # Valid req: 5000*2/1M = 0.01, 1000*8/1M = 0.008, 2000*0.5/1M = 0.001 -> Total = 0.019
+    # Unpriced req: 0.0
+    assert abs(row[0] - 0.01) < 0.00001
+    assert abs(row[1] - 0.008) < 0.00001
+    assert abs(row[2] - 0.001) < 0.00001
+    assert abs(row[3] - 0.019) < 0.00001
+    assert row[4] == 1
+

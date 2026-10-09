@@ -101,6 +101,22 @@ class ReconciliationEngine:
                 details=f"Output token aggregation across all records."
             ))
 
+        # 5b. Total Cached Tokens
+        exp_cached_tokens = expected_manifest.get("total_cached_tokens")
+        act_cached_tokens = int(actual_df["cached_tokens"].sum()) if not actual_df.empty else 0
+        if exp_cached_tokens is not None:
+            diff = act_cached_tokens - exp_cached_tokens
+            results.append(ValidationCheckResult(
+                metric="Total Cached Tokens",
+                category="Token Volume",
+                expected=f"{exp_cached_tokens:,}",
+                actual=f"{act_cached_tokens:,}",
+                difference=f"{diff:,}",
+                tolerance="Exact (0)",
+                status="PASS" if diff == 0 else "FAIL",
+                details="Cached token aggregation across all records."
+            ))
+
         # 6. Total Grand Cost (Financial Reconciliation)
         exp_cost = expected_manifest.get("total_cost_usd")
         act_cost = round(float(actual_df["total_cost_usd"].sum()), 4) if not actual_df.empty else 0.0
@@ -136,6 +152,31 @@ class ReconciliationEngine:
                 details="Verifies multidimensional consistency without attribution loss."
             ))
 
+        # 7b. Multidimensional Team Spend Reconciliation (vs Golden Expected Team Costs)
+        exp_team_costs = expected_manifest.get("team_costs")
+        if exp_team_costs and not actual_df.empty:
+            act_team_costs = actual_df.groupby("team")["total_cost_usd"].sum().round(4).to_dict()
+            all_teams_pass = True
+            mismatches = []
+            for t_name, exp_val in exp_team_costs.items():
+                act_val = act_team_costs.get(t_name, 0.0)
+                t_diff = round(act_val - exp_val, 4)
+                if abs(t_diff) > self.tolerance_usd:
+                    all_teams_pass = False
+                    mismatches.append(f"{t_name} (exp: ${exp_val:.4f}, act: ${act_val:.4f})")
+            
+            status = "PASS" if all_teams_pass else "FAIL"
+            results.append(ValidationCheckResult(
+                metric="Team Allocation Multi-Dimensional Reconciliation",
+                category="Financial Integrity",
+                expected=f"{len(exp_team_costs)} teams match golden manifest",
+                actual="100% matched" if all_teams_pass else f"Mismatches: {', '.join(mismatches)}",
+                difference="±$0.0000",
+                tolerance=f"±${self.tolerance_usd:.2f}",
+                status=status,
+                details=f"Verified individual team totals: {', '.join([f'{k}: ${v:.2f}' for k, v in exp_team_costs.items()])}"
+            ))
+
         # 8. Missing Pricing Exceptions Check
         missing_count = int(actual_df["missing_price"].sum()) if not actual_df.empty else 0
         exp_missing = expected_manifest.get("expected_missing_price_records", 0)
@@ -165,6 +206,21 @@ class ReconciliationEngine:
             details="Requests with missing team/feature attribution are explicitly isolated."
         ))
 
+        # 10. Quarantined Rejection Rows Accounting (if specified in golden manifest)
+        exp_rejected = expected_manifest.get("expected_rejected_rows")
+        if exp_rejected is not None:
+            diff = rejected_rows - exp_rejected
+            results.append(ValidationCheckResult(
+                metric="Quarantined Rejection Accounting",
+                category="Ingestion Integrity",
+                expected=exp_rejected,
+                actual=rejected_rows,
+                difference=diff,
+                tolerance="Exact (0)",
+                status="PASS" if diff == 0 else "FAIL",
+                details=f"Quarantined {rejected_rows} rows ({ingestion_stats.get('duplicate_count', 0)} duplicates + schema rejects)."
+            ))
+
         return results
 
     def generate_markdown_report(
@@ -193,6 +249,7 @@ class ReconciliationEngine:
             "## 2. Methodology & Guarantees",
             "- **Independent Recompute:** Expected values computed independently via separate test manifest, never sharing engine cache or view code.",
             "- **Deterministic Decimal Math:** Rates calculated via integer micro-units and 6-decimal fixed-point precision.",
+            "- **Cached Token Precision:** Cached input tokens priced against distinct cached rate cards, preserving exact margin.",
             "- **Strict Attribution Preservation:** Unattributed requests are explicitly isolated rather than omitted.",
             "- **Zero-Silent-Pricing Rule:** Models without pricing are flagged as exceptions with missing price indicators.",
             "",
@@ -210,14 +267,17 @@ class ReconciliationEngine:
             "## 4. Spot-Check Audit (Independently Hand-Calculated Sample)",
             "The following random records were independently recalculated by hand and verified against the cost engine output:",
             "",
-            "| Request ID | Model | In Tokens | Out Tokens | Rate (In/Out per 1M) | Expected Cost ($) | Engine Cost ($) | Status |",
-            "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |"
+            "| Request ID | Model | In Tokens | Out Tokens | Cached Tokens | Rates (In / Out / Cached $/1M) | Expected Cost ($) | Engine Cost ($) | Status |",
+            "| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
         ])
 
         for sc in spot_checks:
+            cached_tok_val = sc.get("cached_tokens", 0)
+            cached_rate_val = sc.get("cached_rate", 0.0)
+            rates_str = f"${sc['in_rate']:.2f} / ${sc['out_rate']:.2f} / ${cached_rate_val:.3f}"
             lines.append(
-                f"| `{sc['request_id']}` | `{sc['model']}` | {sc['input_tokens']:,} | {sc['output_tokens']:,} | "
-                f"${sc['in_rate']:.2f} / ${sc['out_rate']:.2f} | ${sc['expected_cost']:.6f} | ${sc['actual_cost']:.6f} | "
+                f"| `{sc['request_id']}` | `{sc['model']}` | {sc['input_tokens']:,} | {sc['output_tokens']:,} | {cached_tok_val:,} | "
+                f"{rates_str} | ${sc['expected_cost']:.6f} | ${sc['actual_cost']:.6f} | "
                 f"{'✅ MATCH' if abs(sc['expected_cost'] - sc['actual_cost']) < 0.00001 else '❌ MISMATCH'} |"
             )
 

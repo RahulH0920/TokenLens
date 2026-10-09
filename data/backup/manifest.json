@@ -1,0 +1,38 @@
+{
+  "version": "1.0.0",
+  "timestamp": "2026-10-10T00:00:00Z",
+  "description": "TokenLens Pristine Demo Baseline Backup Dataset",
+  "financial_invariants": {
+    "source_requests": 1208,
+    "valid_loaded_requests": 1200,
+    "rejected_requests": 8,
+    "quarantined_duplicates": 5,
+    "schema_rejected": 3,
+    "total_input_tokens": 4711994,
+    "total_output_tokens": 1006027,
+    "total_cached_tokens": 420691,
+    "input_token_cost": 7.794,
+    "output_token_cost": 6.3934,
+    "cached_token_cost": 0.176,
+    "grand_total_spend": 14.3634,
+    "missing_pricing_count": 6
+  },
+  "files": {
+    "sample_requests.csv": {
+      "size_bytes": 139576,
+      "sha256": "2805c31f7aaa581a95f3b0cda2e58ee1facd04aab304758614098d850cef2321"
+    },
+    "model_pricing.csv": {
+      "size_bytes": 593,
+      "sha256": "da366832d77414b888ed5b2986ea16606f62058ccd3fd9ecb17c098f4be91d83"
+    },
+    "golden_validation.json": {
+      "size_bytes": 499,
+      "sha256": "1afcffc4bd91273237fa83b3fd7ee2684ef3a012f440d0337b9d2b4a63d518d3"
+    },
+    "attribution.yaml": {
+      "size_bytes": 760,
+      "sha256": "470bdc4ba44444ff42202799a097650964d54a61e956659e73915062c02a828c"
+    }
+  }
+}

@@ -8,13 +8,24 @@ import pandas as pd
 
 from core.models import RequestRecord, PricingRecord
 from core.attribution import AttributionParser
+from core.provider_adapters import ProviderAdapterRegistry
 
 
 class DataImporter:
     def __init__(self, attribution_parser: Optional[AttributionParser] = None):
         self.attribution = attribution_parser or AttributionParser()
+        self.provider_adapters = ProviderAdapterRegistry(self.attribution)
         self.rejected_records: List[Dict[str, Any]] = []
         self.duplicate_records: List[Dict[str, Any]] = []
+
+    def parse_provider_payload(
+        self,
+        payload: Dict[str, Any],
+        format_hint: Optional[str] = None,
+        headers: Optional[Dict[str, Any]] = None
+    ) -> Tuple[RequestRecord, str]:
+        """Normalize raw provider payload (OpenAI, Anthropic, Google, Simulated) into RequestRecord."""
+        return self.provider_adapters.parse_payload(payload, format_hint=format_hint, headers=headers)
 
     def load_pricing(self, csv_path: Path) -> List[PricingRecord]:
         """Load model pricing CSV file into validated PricingRecords."""

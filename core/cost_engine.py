@@ -102,12 +102,12 @@ class CostEngine:
                 p.input_usd_per_1m,
                 p.output_usd_per_1m,
                 p.cached_usd_per_1m,
-                (r.input_tokens * COALESCE(p.input_usd_per_1m, 0.0)) / 1000000.0 AS input_cost_usd,
-                (r.output_tokens * COALESCE(p.output_usd_per_1m, 0.0)) / 1000000.0 AS output_cost_usd,
-                (COALESCE(r.cached_tokens, 0) * COALESCE(p.cached_usd_per_1m, 0.0)) / 1000000.0 AS cached_cost_usd,
-                ((r.input_tokens * COALESCE(p.input_usd_per_1m, 0.0)) + 
+                ROUND((r.input_tokens * COALESCE(p.input_usd_per_1m, 0.0)) / 1000000.0, 6) AS input_cost_usd,
+                ROUND((r.output_tokens * COALESCE(p.output_usd_per_1m, 0.0)) / 1000000.0, 6) AS output_cost_usd,
+                ROUND((COALESCE(r.cached_tokens, 0) * COALESCE(p.cached_usd_per_1m, 0.0)) / 1000000.0, 6) AS cached_cost_usd,
+                ROUND(((r.input_tokens * COALESCE(p.input_usd_per_1m, 0.0)) + 
                  (r.output_tokens * COALESCE(p.output_usd_per_1m, 0.0)) + 
-                 (COALESCE(r.cached_tokens, 0) * COALESCE(p.cached_usd_per_1m, 0.0))) / 1000000.0 AS total_cost_usd,
+                 (COALESCE(r.cached_tokens, 0) * COALESCE(p.cached_usd_per_1m, 0.0))) / 1000000.0, 6) AS total_cost_usd,
                 (p.model IS NULL) AS missing_price
             FROM requests r
             LEFT JOIN (
@@ -279,3 +279,238 @@ class CostEngine:
             "model_sum": model_sum,
             "date_sum": date_sum
         }
+
+    def get_missing_pricing_summary(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Summarize requests that encountered missing pricing cards."""
+        if df.empty or "missing_price" not in df.columns:
+            return {"count": 0, "models": [], "requests": []}
+
+        unpriced_df = df[df["missing_price"]]
+        if unpriced_df.empty:
+            return {"count": 0, "models": [], "requests": []}
+
+        unpriced_models = sorted(unpriced_df["model"].unique().tolist())
+        return {
+            "count": len(unpriced_df),
+            "models": unpriced_models,
+            "total_tokens_unpriced": int(unpriced_df["total_tokens"].sum()),
+            "affected_teams": sorted(unpriced_df["team"].unique().tolist()),
+            "requests": unpriced_df[["request_id", "timestamp_utc", "model", "team", "feature", "user_id", "total_tokens"]].to_dict(orient="records")
+        }
+
+    def get_budget_utilization(self, df: pd.DataFrame, custom_budgets: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+        """Calculate department-level and organizational budget utilization and threshold alerts."""
+        default_budgets = {
+            "engineering": 4.00,
+            "research": 3.50,
+            "product": 3.50,
+            "support": 3.00,
+            "marketing": 2.50,
+            "unattributed": 1.00
+        }
+        budgets = dict(default_budgets)
+        if custom_budgets:
+            budgets.update(custom_budgets)
+
+        team_spend = {}
+        if not df.empty:
+            team_spend = df.groupby("team")["total_cost_usd"].sum().to_dict()
+
+        departments = []
+        total_budget = sum(budgets.values())
+        total_actual = 0.0
+
+        for team, budget in budgets.items():
+            actual = float(team_spend.get(team, 0.0))
+            total_actual += actual
+            pct = (actual / budget * 100.0) if budget > 0 else 0.0
+            remaining = budget - actual
+
+            if pct >= 100.0:
+                status = "CRITICAL"
+                badge = "🔴 OVER BUDGET"
+            elif pct >= 80.0:
+                status = "WARNING"
+                badge = "🟡 NEAR CAPACITY"
+            else:
+                status = "SAFE"
+                badge = "🟢 ON TRACK"
+
+            departments.append({
+                "team": team,
+                "budget_usd": round(budget, 2),
+                "actual_spend_usd": round(actual, 4),
+                "remaining_usd": round(remaining, 4),
+                "utilization_pct": round(pct, 1),
+                "status": status,
+                "badge": badge
+            })
+
+        # Sort by utilization desc
+        departments.sort(key=lambda d: d["utilization_pct"], reverse=True)
+
+        overall_pct = (total_actual / total_budget * 100.0) if total_budget > 0 else 0.0
+        alerts_count = sum(1 for d in departments if d["status"] in {"WARNING", "CRITICAL"})
+
+        return {
+            "total_budget_usd": round(total_budget, 2),
+            "total_actual_spend_usd": round(total_actual, 4),
+            "total_remaining_usd": round(total_budget - total_actual, 4),
+            "overall_utilization_pct": round(overall_pct, 1),
+            "overall_status": "WARNING" if overall_pct >= 80.0 else "SAFE",
+            "active_alerts_count": alerts_count,
+            "departments": departments
+        }
+
+    def get_cost_driver_insights(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Analyze top cost drivers, model concentration, and prompt efficiency anomalies."""
+        if df.empty:
+            return {"top_drivers": [], "model_concentration": {}, "efficiency_anomalies": []}
+
+        tot_spend = float(df["total_cost_usd"].sum())
+
+        # 1. Top Feature / Team Drivers
+        grouped = df.groupby(["team", "feature"]).agg(
+            spend=("total_cost_usd", "sum"),
+            requests=("request_id", "count"),
+            in_tokens=("input_tokens", "sum"),
+            out_tokens=("output_tokens", "sum"),
+            top_model=("model", lambda x: x.mode()[0] if not x.empty else "unknown")
+        ).reset_index().sort_values("spend", ascending=False)
+
+        top_drivers = []
+        for _, row in grouped.head(5).iterrows():
+            sp = float(row["spend"])
+            top_drivers.append({
+                "team": row["team"],
+                "feature": row["feature"],
+                "top_model": row["top_model"],
+                "spend_usd": round(sp, 4),
+                "requests": int(row["requests"]),
+                "share_pct": round((sp / tot_spend * 100.0) if tot_spend > 0 else 0.0, 1)
+            })
+
+        # 2. Model Concentration
+        model_spend = df.groupby("model")["total_cost_usd"].sum().sort_values(ascending=False)
+        top_2_models = model_spend.head(2)
+        top_2_share = float(top_2_models.sum() / tot_spend * 100.0) if tot_spend > 0 else 0.0
+
+        model_concentration = {
+            "top_models": [
+                {"model": m, "spend_usd": round(float(v), 4), "share_pct": round(float(v / tot_spend * 100.0) if tot_spend > 0 else 0.0, 1)}
+                for m, v in model_spend.items()
+            ],
+            "top_2_concentration_pct": round(top_2_share, 1)
+        }
+
+        # 3. Prompt-heavy efficiency anomalies (high input-to-output ratio)
+        anomalies = []
+        feat_tokens = df.groupby("feature").agg(
+            in_tok=("input_tokens", "sum"),
+            out_tok=("output_tokens", "sum"),
+            cached_tok=("cached_tokens", "sum"),
+            spend=("total_cost_usd", "sum")
+        ).reset_index()
+
+        for _, row in feat_tokens.iterrows():
+            total_t = row["in_tok"] + row["out_tok"]
+            in_ratio = (row["in_tok"] / total_t * 100.0) if total_t > 0 else 0.0
+            if in_ratio > 80.0 and row["spend"] > 1.0:
+                anomalies.append({
+                    "feature": row["feature"],
+                    "input_ratio_pct": round(in_ratio, 1),
+                    "spend_usd": round(float(row["spend"]), 4),
+                    "recommendation": "Review context stuffing; implement prompt caching or prompt compression"
+                })
+
+        return {
+            "top_drivers": top_drivers,
+            "model_concentration": model_concentration,
+            "efficiency_anomalies": anomalies
+        }
+
+    def get_optimization_recommendations(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """Generate high-impact, data-backed FinOps optimization recommendations with audited ROI."""
+        if df.empty:
+            return []
+
+        recommendations = []
+
+        # Recommendation 1: Model Right-Sizing for doc-search
+        doc_search_df = df[(df["feature"] == "doc-search") & (df["model"] == "claude-3-5-sonnet")]
+        if not doc_search_df.empty:
+            curr_spend = float(doc_search_df["total_cost_usd"].sum())
+            in_tok = int(doc_search_df["input_tokens"].sum())
+            out_tok = int(doc_search_df["output_tokens"].sum())
+            cached_tok = int(doc_search_df["cached_tokens"].sum())
+
+            # Target model: claude-3-haiku ($0.25 in / $1.25 out / $0.03 cached)
+            haiku_price_in = Decimal("0.25")
+            haiku_price_out = Decimal("1.25")
+            haiku_price_cached = Decimal("0.03")
+            sim_spend = float(
+                ((Decimal(in_tok) * haiku_price_in + Decimal(out_tok) * haiku_price_out + Decimal(cached_tok) * haiku_price_cached) / Decimal("1000000"))
+                .quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+            )
+            savings = curr_spend - sim_spend
+            savings_pct = (savings / curr_spend * 100.0) if curr_spend > 0 else 0.0
+
+            recommendations.append({
+                "id": "rec_rightsize_doc_search",
+                "title": "Model Right-Sizing: Route 'doc-search' to Claude-3-Haiku",
+                "category": "Architectural Right-Sizing",
+                "priority": "HIGH",
+                "workload_feature": "doc-search",
+                "current_model": "claude-3-5-sonnet",
+                "recommended_model": "claude-3-haiku",
+                "affected_requests": len(doc_search_df),
+                "current_spend_usd": round(curr_spend, 4),
+                "projected_spend_usd": round(sim_spend, 4),
+                "projected_savings_usd": round(savings, 4),
+                "savings_pct": round(savings_pct, 1),
+                "annualized_monthly_savings_usd": round(savings * 4.33, 2),
+                "description": (
+                    f"Downgrading search indexing from Tier-1 Claude-3.5-Sonnet to Claude-3-Haiku yields "
+                    f"a projected {savings_pct:.1f}% reduction (${savings:.2f} savings per period) without compromising retrieval quality."
+                ),
+                "action_steps": [
+                    "Update model parameter in prompt template config from 'claude-3-5-sonnet' to 'claude-3-haiku'.",
+                    "Conduct retrieval benchmark verification across standard golden evaluation queries.",
+                    "Deploy to staging gateway and monitor latency (Haiku expected 2-3x faster)."
+                ]
+            })
+
+        # Recommendation 2: Expand Prompt Caching on repetitive workloads
+        high_input_df = df[df["input_tokens"] > 5000]
+        if not high_input_df.empty:
+            uncached_reqs = high_input_df[high_input_df["cached_tokens"] == 0]
+            if not uncached_reqs.empty:
+                uncached_in_tok = int(uncached_reqs["input_tokens"].sum())
+                est_cache_savings = float(uncached_in_tok * 1.5 / 1000000.0)  # ~$1.50/M avg differential
+                recommendations.append({
+                    "id": "rec_prompt_caching_expansion",
+                    "title": "Prompt Caching: Standardize 1K+ Prefix Caching on Large Workloads",
+                    "category": "Prompt Engineering",
+                    "priority": "MEDIUM",
+                    "workload_feature": "high-context-prompts",
+                    "current_model": "multi-model",
+                    "recommended_model": "cached-endpoints",
+                    "affected_requests": len(uncached_reqs),
+                    "current_spend_usd": round(float(uncached_reqs["total_cost_usd"].sum()), 4),
+                    "projected_spend_usd": round(float(uncached_reqs["total_cost_usd"].sum()) - est_cache_savings, 4),
+                    "projected_savings_usd": round(est_cache_savings, 4),
+                    "savings_pct": round((est_cache_savings / float(uncached_reqs["total_cost_usd"].sum()) * 100.0) if float(uncached_reqs["total_cost_usd"].sum()) > 0 else 0.0, 1),
+                    "annualized_monthly_savings_usd": round(est_cache_savings * 4.33, 2),
+                    "description": (
+                        f"Found {len(uncached_reqs)} high-context requests with zero cache utilization. "
+                        f"Enabling prefix caching provides up to ${est_cache_savings:.2f} in immediate prompt cost reduction."
+                    ),
+                    "action_steps": [
+                        "Order system instructions and tools at the start of prompts before user dynamic content.",
+                        "Set Anthropic 'cache_control': {'type': 'ephemeral'} on static message prefixes.",
+                        "Verify OpenAI prompt cache hit metrics in request logs."
+                    ]
+                })
+
+        return recommendations
+
