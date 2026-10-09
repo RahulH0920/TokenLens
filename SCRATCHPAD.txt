@@ -89,14 +89,20 @@ decisions.
     endpoint or Anthropic /v1/messages, generates synthetic assistant completions,
     calculates deterministic token counts, and stamps X-FinOps-Dummy-Mode: true.
 
-[FEATURE 4: Streamlined Executive Dashboard (Settings & Rate Card Integrated)]
+[FEATURE 4: Streamlined Executive Dashboard (Spend by Team & Pie Charts Redesigned)]
 - Files: app.py, .streamlit/config.toml
 - Tools/Libraries: Streamlit, Plotly Express/Graph Objects, Custom SaaS CSS Theme
 - Part It Plays: Interactive visual cockpit for engineering and finance teams.
-- Problems Solved: Transparent operational status; shows at a glance which models
-  run with live API credentials vs synthetic simulation.
-- Capabilities:
-  - Settings workspace displays model rate cards with visual source badges.
+- Spend by Team Redesign:
+  - Vertical Details Cards: Replaced horizontal metric columns with vertically stacked
+    cards (.team-detail-card-vertical) displaying Total Spend, Total Requests, Token
+    Consumption, Primary Model, and Active Callers.
+  - Team Feature Pie Charts: Converted feature spend bar charts into interactive Plotly
+    donut pie charts with center spend annotations and percentage slices.
+  - Overview Pie Chart: Added organizational spend share pie chart for high-level
+    department comparison at a glance.
+- Settings Workspace:
+  - Displays model rate cards with visual source badges (Real-Time vs Dummy Data).
   - Live API key configuration and verification inputs for OpenAI and Gemini.
   - One-click synthetic request injection for claude-3-5-sonnet with instant
     deterministic cost computation and attribution update.

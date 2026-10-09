@@ -383,6 +383,49 @@ st.markdown("""
         line-height: 1.2;
     }
 
+    /* Vertical Details Cards for Teams */
+    .team-detail-card-vertical {
+        background: #FFFFFF;
+        border: 1px solid #E5E7EB;
+        border-radius: 9px;
+        padding: 10px 14px;
+        margin-bottom: 8px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        transition: all 0.15s ease-in-out;
+    }
+    .team-detail-card-vertical:hover {
+        border-color: #CBD5E1;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+        background-color: #FAFAFA;
+    }
+    .team-detail-card-left {
+        display: flex;
+        flex-direction: column;
+        text-align: left;
+    }
+    .team-detail-card-label {
+        font-size: 0.68rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #6B7280;
+        margin-bottom: 2px;
+    }
+    .team-detail-card-sub {
+        font-size: 0.74rem;
+        color: #9CA3AF;
+    }
+    .team-detail-card-val {
+        font-size: 1.15rem;
+        font-weight: 700;
+        color: #111827;
+        text-align: right;
+        line-height: 1.15;
+    }
+
     /* Hide unnecessary streamlit chrome */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
@@ -425,7 +468,7 @@ if "df" not in st.session_state:
     st.session_state.priced_list = priced_list
 
 if "expanded_team" not in st.session_state:
-    st.session_state["expanded_team"] = None
+    st.session_state["expanded_team"] = "support"
 
 if "nav_view" not in st.session_state:
     st.session_state["nav_view"] = "Command Center"
@@ -584,10 +627,71 @@ if active_view == "Command Center":
         st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.5rem 0 1.2rem;'>", unsafe_allow_html=True)
         st.markdown("""
         <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.6rem;">
-            <span style="font-size: 1.05rem; font-weight: 600; color: #111827;">Spend by team</span>
+            <div>
+                <span style="font-size: 1.05rem; font-weight: 600; color: #111827;">Spend by team</span>
+                <p style="color: #6B7280; font-size: 0.80rem; margin: 2px 0 0 0;">Departmental token usage with vertical details cards and dedicated feature pie charts.</p>
+            </div>
             <span style="font-size: 0.78rem; color: #6B7280;">Click a team to expand details</span>
         </div>
         """, unsafe_allow_html=True)
+
+        # Overall Organization Spend by Team Pie Chart Card
+        with st.expander("📊 Organization Spend by Team (Pie Chart Overview)", expanded=False):
+            team_pie_col1, team_pie_col2 = st.columns([1.2, 1], gap="medium")
+            with team_pie_col1:
+                all_teams_pie_df = filtered_df.groupby("team")["total_cost_usd"].sum().reset_index().sort_values(by="total_cost_usd", ascending=False)
+                fig_all_teams = px.pie(
+                    all_teams_pie_df,
+                    names="team",
+                    values="total_cost_usd",
+                    hole=0.48,
+                    color_discrete_sequence=["#4F46E5", "#06B6D4", "#10B981", "#F59E0B", "#8B5CF6", "#EC4899", "#6366F1"]
+                )
+                fig_all_teams.update_traces(
+                    textposition="inside",
+                    textinfo="percent",
+                    hovertemplate="<b>Department: %{label}</b><br>Spend: $%{value:,.2f}<br>Share: %{percent}<extra></extra>",
+                    marker=dict(line=dict(color="#FFFFFF", width=2))
+                )
+                fig_all_teams.update_layout(PLOT_LAYOUT)
+                fig_all_teams.update_layout(
+                    height=270,
+                    margin=dict(l=10, r=10, t=10, b=25),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=-0.22,
+                        xanchor="center",
+                        x=0.5,
+                        font=dict(size=11, color="#4B5563")
+                    ),
+                    annotations=[
+                        dict(
+                            text=f"<b>${tot_spend:,.2f}</b><br><span style='font-size:10px;color:#6B7280;'>Org Total</span>",
+                            x=0.5, y=0.5,
+                            font_size=13,
+                            showarrow=False
+                        )
+                    ]
+                )
+                st.plotly_chart(fig_all_teams, use_container_width=True)
+            with team_pie_col2:
+                st.markdown("<div style='font-size: 0.90rem; font-weight: 600; color: #111827; margin-bottom: 6px;'>Departmental Spend Ranking</div>", unsafe_allow_html=True)
+                st.caption("Distribution of total LLM expenditure across all organizational units.")
+                all_teams_disp = all_teams_pie_df.copy()
+                all_teams_disp["share"] = (all_teams_disp["total_cost_usd"] / tot_spend * 100).apply(lambda s: f"{s:.1f}%")
+                all_teams_disp["spend"] = all_teams_disp["total_cost_usd"].apply(lambda v: f"${v:,.2f}")
+                all_teams_disp["team"] = all_teams_disp["team"].str.capitalize()
+                st.dataframe(
+                    all_teams_disp[["team", "spend", "share"]],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "team": st.column_config.TextColumn("Department"),
+                        "spend": st.column_config.TextColumn("Total Spend"),
+                        "share": st.column_config.TextColumn("Share (%)")
+                    }
+                )
 
         # Four primary teams: Support, Engineering, Product, Marketing + other active teams
         core_teams = ["support", "engineering", "product", "marketing"]
@@ -601,6 +705,14 @@ if active_view == "Command Center":
             t_share = (t_spend / tot_spend * 100) if tot_spend > 0 else 0.0
             t_reqs = len(t_df)
             t_tokens = int(t_df["total_tokens"].sum()) if not t_df.empty else 0
+            t_in_cost = float(t_df["input_cost_usd"].sum()) if not t_df.empty else 0.0
+            t_out_cost = float(t_df["output_cost_usd"].sum()) if not t_df.empty else 0.0
+            tok_disp = f"{t_tokens / 1e6:,.2f}M" if t_tokens >= 1e6 else f"{t_tokens:,}"
+            top_model = t_df["model"].mode()[0] if not t_df.empty else "N/A"
+            top_cnt = int((t_df["model"] == top_model).sum()) if not t_df.empty else 0
+            top_share = (top_cnt / t_reqs * 100) if t_reqs > 0 else 0.0
+            t_users = t_df["user_id"].nunique() if not t_df.empty else 0
+            avg_cost = (t_spend / t_reqs) if t_reqs > 0 else 0.0
 
             is_selected = (st.session_state.get("expanded_team") == t_name)
 
@@ -626,72 +738,96 @@ if active_view == "Command Center":
                 if t_df.empty:
                     st.info(f"No requests recorded for {team_display} in the active filter selection.")
                 else:
-                    # 1. Three easy-to-read metrics: total spend, number of requests, and total tokens
-                    m1, m2, m3 = st.columns(3)
-                    with m1:
+                    col_details, col_chart = st.columns([1, 1.3], gap="medium")
+
+                    with col_details:
                         st.markdown(f"""
-                        <div class="team-detail-metric">
-                            <div class="team-detail-metric-label">Total Spend</div>
-                            <div class="team-detail-metric-value">${t_spend:,.2f}</div>
+                        <div class="team-detail-card-vertical">
+                            <div class="team-detail-card-left">
+                                <span class="team-detail-card-label">Total Spend</span>
+                                <span class="team-detail-card-sub">{share_str} of organization spend</span>
+                            </div>
+                            <div class="team-detail-card-val">${t_spend:,.2f}</div>
                         </div>
-                        """, unsafe_allow_html=True)
-                    with m2:
-                        st.markdown(f"""
-                        <div class="team-detail-metric">
-                            <div class="team-detail-metric-label">Requests</div>
-                            <div class="team-detail-metric-value">{t_reqs:,}</div>
+                        <div class="team-detail-card-vertical">
+                            <div class="team-detail-card-left">
+                                <span class="team-detail-card-label">Total Requests</span>
+                                <span class="team-detail-card-sub">Avg ${avg_cost:.4f} / request</span>
+                            </div>
+                            <div class="team-detail-card-val">{t_reqs:,}</div>
                         </div>
-                        """, unsafe_allow_html=True)
-                    with m3:
-                        tok_disp = f"{t_tokens / 1e6:,.2f}M" if t_tokens >= 1e6 else f"{t_tokens:,}"
-                        st.markdown(f"""
-                        <div class="team-detail-metric">
-                            <div class="team-detail-metric-label">Total Tokens</div>
-                            <div class="team-detail-metric-value">{tok_disp}</div>
+                        <div class="team-detail-card-vertical">
+                            <div class="team-detail-card-left">
+                                <span class="team-detail-card-label">Total Tokens</span>
+                                <span class="team-detail-card-sub">In: ${t_in_cost:,.2f} · Out: ${t_out_cost:,.2f}</span>
+                            </div>
+                            <div class="team-detail-card-val">{tok_disp}</div>
+                        </div>
+                        <div class="team-detail-card-vertical">
+                            <div class="team-detail-card-left">
+                                <span class="team-detail-card-label">Primary Model</span>
+                                <span class="team-detail-card-sub">{top_cnt:,} requests ({top_share:.1f}%)</span>
+                            </div>
+                            <div class="team-detail-card-val">{top_model}</div>
+                        </div>
+                        <div class="team-detail-card-vertical">
+                            <div class="team-detail-card-left">
+                                <span class="team-detail-card-label">Active Callers</span>
+                                <span class="team-detail-card-sub">Unique user identities</span>
+                            </div>
+                            <div class="team-detail-card-val">{t_users:,}</div>
                         </div>
                         """, unsafe_allow_html=True)
 
-                    # 2. Simple horizontal bar chart of spend by feature for that team
-                    st.markdown(f"<div style='font-size: 0.82rem; font-weight: 600; color: #4B5563; margin: 12px 0 4px;'>Where {team_display} spends</div>", unsafe_allow_html=True)
-                    feat_sub = t_df.groupby("feature")["total_cost_usd"].sum().reset_index().sort_values(by="total_cost_usd", ascending=True)
-
-                    fig_feat_sub = px.bar(
-                        feat_sub,
-                        x="total_cost_usd",
-                        y="feature",
-                        orientation="h",
-                        text=feat_sub["total_cost_usd"].apply(lambda v: f"${v:,.2f}"),
-                        labels={"total_cost_usd": "Spend ($)", "feature": "Feature"}
-                    )
-                    fig_feat_sub.update_traces(
-                        marker_color="#818CF8",
-                        textposition="outside",
-                        textfont=dict(color="#4B5563", size=10),
-                        cliponaxis=False
-                    )
-                    fig_feat_sub.update_layout(PLOT_LAYOUT)
-                    fig_feat_sub.update_layout(
-                        height=max(115, 26 * len(feat_sub) + 35),
-                        margin=dict(l=5, r=40, t=10, b=10)
-                    )
-                    st.plotly_chart(fig_feat_sub, use_container_width=True)
-
-                    # 3. Most-used model & button to view that team's requests
-                    top_model = t_df["model"].mode()[0] if not t_df.empty else "N/A"
-                    top_cnt = (t_df["model"] == top_model).sum() if not t_df.empty else 0
-
-                    sub_left, sub_right = st.columns([1.3, 1])
-                    with sub_left:
-                        st.markdown(f"""
-                        <div style="font-size: 0.82rem; color: #6B7280; padding-top: 6px;">
-                            Most-used model: <strong style="color: #111827;">{top_model}</strong> ({top_cnt:,} requests)
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with sub_right:
                         if st.button(f"View {team_display}'s requests →", key=f"drill_reqs_btn_{t_name}", use_container_width=True):
                             st.session_state["nav_view"] = "Request Logs"
                             st.session_state["request_logs_team_filter"] = t_name
                             st.rerun()
+
+                    with col_chart:
+                        st.markdown(f"<div style='font-size: 0.88rem; font-weight: 600; color: #111827; margin-bottom: 2px;'>{team_display} Spend Distribution by Feature</div>", unsafe_allow_html=True)
+                        st.caption(f"Donut pie chart breakdown of {team_display}'s spend across product features.")
+
+                        feat_sub = t_df.groupby("feature")["total_cost_usd"].sum().reset_index().sort_values(by="total_cost_usd", ascending=False)
+
+                        if feat_sub.empty:
+                            st.info(f"No feature requests found for {team_display}.")
+                        else:
+                            fig_feat_pie = px.pie(
+                                feat_sub,
+                                names="feature",
+                                values="total_cost_usd",
+                                hole=0.48,
+                                color_discrete_sequence=["#4F46E5", "#06B6D4", "#10B981", "#F59E0B", "#8B5CF6", "#EC4899", "#6366F1"]
+                            )
+                            fig_feat_pie.update_traces(
+                                textposition="inside",
+                                textinfo="percent",
+                                hovertemplate="<b>Feature: %{label}</b><br>Spend: $%{value:,.2f}<br>Share: %{percent}<extra></extra>",
+                                marker=dict(line=dict(color="#FFFFFF", width=2))
+                            )
+                            fig_feat_pie.update_layout(PLOT_LAYOUT)
+                            fig_feat_pie.update_layout(
+                                height=280,
+                                margin=dict(l=10, r=10, t=10, b=25),
+                                legend=dict(
+                                    orientation="h",
+                                    yanchor="bottom",
+                                    y=-0.22,
+                                    xanchor="center",
+                                    x=0.5,
+                                    font=dict(size=11, color="#4B5563")
+                                ),
+                                annotations=[
+                                    dict(
+                                        text=f"<b>${t_spend:,.2f}</b><br><span style='font-size:10px;color:#6B7280;'>{team_display}</span>",
+                                        x=0.5, y=0.5,
+                                        font_size=13,
+                                        showarrow=False
+                                    )
+                                ]
+                            )
+                            st.plotly_chart(fig_feat_pie, use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
 

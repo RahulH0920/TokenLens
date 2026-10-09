@@ -45,6 +45,10 @@
 ### 4. Streamlined Executive Command Center Dashboard
 - **Tools Used:** `Streamlit`, `Plotly`, Custom SaaS CSS Design System
 - **What Part It Plays:** Interactive command center for FinOps practitioners, engineering leads, and CFOs.
+- **Spend by Team Redesign:**
+  - **Vertical Details Cards:** Replaced horizontal metric columns with sleek, vertically stacked details cards (`Total Spend`, `Total Requests`, `Token Consumption`, `Primary Model`, and `Active Callers`), featuring subtitles and clean borders.
+  - **Team Feature Pie Charts:** Converted horizontal bar charts into interactive Plotly donut pie charts (`px.pie`) displaying deterministic feature spend share with center spend annotations and custom color palettes.
+  - **Overview Pie Chart:** Added high-level organizational spend share pie chart for comparing departmental proportions at a glance.
 - **Settings Workspace Integration:** Displays model rate cards with visual source badges (`Real-Time API Key` vs `Dummy Data Mode`), live credential configuration inputs for OpenAI and Gemini, and one-click synthetic Claude request injection.
 
 ### 5. Production Security & Access Controls (Phase 3 P0 Scope)

@@ -121,6 +121,34 @@ async def run_dom_test():
             buttons = eval_nav.get("result", {}).get("value", [])
             print(f"[PASS] Available Buttons / Navigation Tabs: {buttons[:10]}")
 
+            # Test 4b: Verify Spend by Team - Vertical Details Cards & Pie Chart in Command Center
+            eval_team_section = await send_cmd("Runtime.evaluate", {
+                "expression": """
+                (() => {
+                    const verticalCards = Array.from(document.querySelectorAll('.team-detail-card-vertical')).map(c => ({
+                        label: c.querySelector('.team-detail-card-label')?.innerText || '',
+                        val: c.querySelector('.team-detail-card-val')?.innerText || '',
+                        sub: c.querySelector('.team-detail-card-sub')?.innerText || ''
+                    }));
+                    const hasPieChart = document.body.innerText.includes('Spend Distribution by Feature') ||
+                                        Array.from(document.querySelectorAll('.js-plotly-plot')).length > 0;
+                    return {
+                        card_count: verticalCards.length,
+                        verticalCards,
+                        hasPieChart
+                    };
+                })()
+                """,
+                "returnByValue": True
+            })
+            team_res = eval_team_section.get("result", {}).get("value", {})
+            print(f"[PASS] Spend by Team: Found {team_res.get('card_count')} vertical detail cards.")
+            for vc in team_res.get("verticalCards", []):
+                print(f"       - {vc.get('label')}: {vc.get('val')} ({vc.get('sub')})")
+            print(f"[PASS] Spend by Team: Team feature pie chart rendered in DOM: {team_res.get('hasPieChart')}")
+            assert team_res.get("card_count", 0) >= 3, "At least 3 vertical detail cards must be present"
+            assert team_res.get("hasPieChart"), "Team pie chart must be present"
+
             # Test 5: Check Spend Detective Tab Click
             print("\nSimulating click on 'Spend Detective' tab...")
             click_eval = await send_cmd("Runtime.evaluate", {
