@@ -1217,7 +1217,11 @@ elif active_view == "Trend":
         label="📥 Download Formal Reconciliation Audit (.md)",
         data=report_md,
         file_name="LLM_FinOps_Reconciliation_Report.md",
-        mime="text/markdown"
+        mime="text/markdown",
+        disabled=not st.checkbox(
+            "I confirm this audit export contains request identifiers and will be stored securely.",
+            key="confirm_audit_export",
+        ),
     )
 
 
@@ -1302,7 +1306,11 @@ elif active_view == "Request Logs":
         label="📥 Export Filtered Logs as CSV",
         data=csv_buf.getvalue(),
         file_name=f"tokenlens_logs_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv"
+        mime="text/csv",
+        disabled=not st.checkbox(
+            "I confirm this export contains user identifiers and usage data and will be stored securely.",
+            key="confirm_logs_export",
+        ),
     )
 
 

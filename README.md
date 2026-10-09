@@ -112,12 +112,13 @@ Local CORS is enabled for Streamlit on port 8501 and common React dev servers on
 
 #### Security setup
 
-- The documented Uvicorn command binds to `127.0.0.1`; keep that binding for local development.
+- The documented Uvicorn command binds to `127.0.0.1`; keep that binding for local development. Streamlit is also configured to bind only to `127.0.0.1`. Without `FINOPS_API_TOKEN`, the API rejects non-loopback clients even if Uvicorn is accidentally started on a public interface.
 - For a private server-to-server deployment, set a random `FINOPS_API_TOKEN` of at least 32 characters. All API routes except `/health` then require `Authorization: Bearer <token>`. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 - Set `FINOPS_ENV=production` in production. The service refuses to start without `FINOPS_API_TOKEN`.
 - Set `FINOPS_ALLOWED_HOSTS` to the API hostnames, `FINOPS_CORS_ORIGINS` to exact frontend origins, and terminate TLS at a trusted reverse proxy. Set `FINOPS_BEHIND_HTTPS_PROXY=true` only when HTTPS is enforced at that proxy.
 - The API token is a service credential. Never embed it in browser JavaScript or a public mobile app. A public multi-user frontend should use an identity provider and a server-side session or API gateway that validates short-lived user tokens and enforces user/team access. Add deployment-level rate limits, secret management, and persistent storage before exposing it to the internet.
-- Request bodies are limited to 64 KiB by default, and demo writes are capped at 10,000 requests per process. Both limits can be adjusted with `FINOPS_MAX_BODY_BYTES` and `FINOPS_MAX_IN_MEMORY_REQUESTS`.
+- Request bodies are limited to 64 KiB by default, POST requests must declare `Content-Length`, and demo writes are capped at 10,000 requests per process. Both limits can be adjusted with `FINOPS_MAX_BODY_BYTES` and `FINOPS_MAX_IN_MEMORY_REQUESTS`.
+- Ledger CSV and reconciliation report downloads ask the operator to confirm secure handling because exports contain request identifiers, user identifiers, and usage data. Keep exported files in access-controlled storage and remove them when no longer needed.
 
 | Endpoint | Purpose |
 | --- | --- |

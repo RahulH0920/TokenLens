@@ -19,7 +19,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
@@ -100,17 +100,25 @@ class NewRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=200)
     timestamp_utc: datetime | None = None
     timestamp: str | None = None
-    team: str = "unattributed"
-    feature: str = "unassigned"
-    user_id: str = "unknown_user"
-    provider: str = "openai"
+    team: str = Field(default="unattributed", min_length=1, max_length=200)
+    feature: str = Field(default="unassigned", min_length=1, max_length=200)
+    user_id: str = Field(default="unknown_user", min_length=1, max_length=200)
+    provider: str = Field(default="openai", min_length=1, max_length=100)
     model: str = Field(min_length=1, max_length=200)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     cached_tokens: int = Field(default=0, ge=0)
-    status: str = "success"
+    status: str = Field(default="success", min_length=1, max_length=50)
     latency_ms: int = Field(default=0, ge=0)
-    env: str = "production"
+    env: str = Field(default="production", min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_token_counts(self):
+        if self.cached_tokens > self.input_tokens:
+            raise ValueError("cached_tokens cannot exceed input_tokens")
+        if self.timestamp and self.timestamp_utc:
+            raise ValueError("provide only one of timestamp or timestamp_utc")
+        return self
 
 
 def _frame() -> pd.DataFrame:
@@ -163,25 +171,49 @@ def health() -> dict:
 @app.middleware("http")
 async def secure_api_requests(request, call_next):
     """Apply baseline transport headers, payload limits, and optional API auth."""
-    if request.url.path != "/health" and request.method != "OPTIONS" and API_TOKEN:
+    client_host = request.client.host if request.client else None
+    is_loopback = False
+    if client_host:
+        try:
+            import ipaddress
+
+            is_loopback = ipaddress.ip_address(client_host).is_loopback
+        except ValueError:
+            is_loopback = client_host.lower() in {"localhost", "testclient"}
+    current_token = os.getenv("FINOPS_API_TOKEN", API_TOKEN)
+    if current_token and len(current_token) < 32:
+        from starlette.responses import JSONResponse
+
+        return JSONResponse(status_code=500, content={"detail": "FINOPS_API_TOKEN misconfigured: must contain at least 32 characters"})
+    if request.url.path != "/health" and request.method != "OPTIONS":
+        if not current_token and not is_loopback:
+            from starlette.responses import JSONResponse
+
+            return JSONResponse(status_code=403, content={"detail": "Remote access is disabled without FINOPS_API_TOKEN"})
+    if request.url.path != "/health" and request.method != "OPTIONS" and current_token:
         authorization = request.headers.get("authorization", "")
         scheme, _, supplied_token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not secrets.compare_digest(supplied_token, API_TOKEN):
+        if scheme.lower() != "bearer" or not secrets.compare_digest(supplied_token, current_token):
             from starlette.responses import JSONResponse
 
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
     content_length = request.headers.get("content-length")
-    if content_length:
+    if content_length is not None:
         try:
-            too_large = int(content_length) > MAX_BODY_BYTES
+            length_val = int(content_length)
+            invalid_length = length_val < 0 or length_val > MAX_BODY_BYTES
         except ValueError:
-            too_large = True
-        if too_large:
+            invalid_length = True
+        if invalid_length:
             from starlette.responses import JSONResponse
 
             return JSONResponse(status_code=413, content={"detail": "Request body too large"})
 
+    if request.method in {"POST", "PUT", "PATCH"} and content_length is None:
+        from starlette.responses import JSONResponse
+
+        return JSONResponse(status_code=411, content={"detail": "Content-Length is required"})
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
