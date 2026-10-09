@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import json
 import ipaddress
 import os
 from pathlib import Path
@@ -18,7 +17,6 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 import secrets
-import pandas as pd
 import uvicorn
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -207,10 +205,6 @@ def _record_usage(
     }
 
 
-def _usage_frame() -> pd.DataFrame:
-    return store.dataframe()
-
-
 @app.middleware("http")
 async def cap_request_body(request: Request, call_next):
     """Bound both declared and chunked request bodies before JSON parsing."""
@@ -365,33 +359,14 @@ def gemini_generate_content(
 
 @app.get("/usage/summary")
 def usage_summary() -> dict[str, Any]:
-    frame = _usage_frame()
-    return {
-        "total_requests": int(len(frame)),
-        "total_input_tokens": int(frame["input_tokens"].sum()) if not frame.empty else 0,
-        "total_cached_tokens": int(frame["cached_tokens"].sum()) if not frame.empty else 0,
-        "total_output_tokens": int(frame["output_tokens"].sum()) if not frame.empty else 0,
-        "total_cost_usd": round(float(frame["total_cost_usd"].sum()), 6) if not frame.empty else 0.0,
-        "providers": frame.groupby("provider").size().to_dict() if not frame.empty else {},
-        "missing_price_requests": int(frame["missing_price"].sum()) if not frame.empty else 0,
-    }
+    return store.summary()
 
 
 @app.get("/usage/breakdown")
 def usage_breakdown(
     by: Literal["provider", "provider_host", "model", "team", "feature", "user_id"] = Query("provider"),
 ) -> list[dict[str, Any]]:
-    frame = _usage_frame()
-    if frame.empty:
-        return []
-    grouped = frame.groupby(by, dropna=False).agg(
-        total_cost_usd=("total_cost_usd", "sum"),
-        request_count=("request_id", "count"),
-        input_tokens=("input_tokens", "sum"),
-        cached_tokens=("cached_tokens", "sum"),
-        output_tokens=("output_tokens", "sum"),
-    ).reset_index()
-    return json.loads(grouped.to_json(orient="records"))
+    return store.breakdown(by)
 
 
 @app.get("/usage/requests")
@@ -400,15 +375,7 @@ def usage_requests(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    frame = _usage_frame().sort_values("timestamp_utc", ascending=False)
-    if provider:
-        frame = frame[frame["provider"].astype(str) == provider.lower()]
-    return {
-        "total": int(len(frame)),
-        "limit": limit,
-        "offset": offset,
-        "items": json.loads(frame.iloc[offset:offset + limit].to_json(orient="records", date_format="iso")),
-    }
+    return store.requests(provider=provider.lower() if provider else None, limit=limit, offset=offset)
 
 
 if __name__ == "__main__":

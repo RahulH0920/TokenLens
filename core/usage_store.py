@@ -6,7 +6,6 @@ from pathlib import Path
 from threading import RLock
 
 import duckdb
-import pandas as pd
 
 from core.models import PricedRequest
 
@@ -59,14 +58,9 @@ class UsageStore:
         provider_host: str,
         provider_request_id: str | None = None,
     ) -> None:
-        with self.lock:
-            self.connection.execute(
-                """
-                INSERT INTO usage_events VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                )
-                """,
-                [
+        self._insert_many(
+            [
+                (
                     request.request_id,
                     request.provider,
                     provider_host,
@@ -89,22 +83,138 @@ class UsageStore:
                     request.total_cost_usd,
                     request.missing_price,
                     request.is_unattributed,
-                ],
-            )
+                )
+            ]
+        )
+
+    def _insert_many(self, rows: list[tuple]) -> None:
+        if not rows:
+            return
+        with self.lock:
+            self.connection.execute("BEGIN TRANSACTION")
+            try:
+                self.connection.executemany(
+                    """
+                    INSERT INTO usage_events VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    rows,
+                )
+                self.connection.execute("COMMIT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
 
     def seed(self, records: list[PricedRequest]) -> None:
         """Load the supplied sample dataset once when creating a fresh ledger."""
         if self.count() != 0:
             return
-        for record in records:
-            self.append(
-                record,
-                provider_host="seed_csv",
-                provider_request_id=record.request_id,
+        rows = [
+            (
+                record.request_id,
+                record.provider,
+                "seed_csv",
+                record.request_id,
+                record.model,
+                record.timestamp_utc,
+                record.team,
+                record.feature,
+                record.user_id,
+                record.env,
+                record.input_tokens,
+                record.output_tokens,
+                record.cached_tokens,
+                record.latency_ms,
+                record.status,
+                record.source,
+                record.input_cost_usd,
+                record.output_cost_usd,
+                record.cached_cost_usd,
+                record.total_cost_usd,
+                record.missing_price,
+                record.is_unattributed,
             )
+            for record in records
+        ]
+        self._insert_many(rows)
 
-    def dataframe(self) -> pd.DataFrame:
+    def summary(self) -> dict:
         with self.lock:
-            return self.connection.execute(
-                "SELECT * FROM usage_events ORDER BY timestamp_utc, request_id"
-            ).df()
+            total = self.connection.execute(
+                """
+                SELECT COUNT(*), COALESCE(SUM(input_tokens), 0),
+                       COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                       COALESCE(SUM(total_cost_usd), 0),
+                       COALESCE(SUM(CASE WHEN missing_price THEN 1 ELSE 0 END), 0)
+                FROM usage_events
+                """
+            ).fetchone()
+            providers = self.connection.execute(
+                "SELECT provider, COUNT(*) FROM usage_events GROUP BY provider"
+            ).fetchall()
+        return {
+            "total_requests": total[0],
+            "total_input_tokens": total[1],
+            "total_cached_tokens": total[2],
+            "total_output_tokens": total[3],
+            "total_cost_usd": float(total[4]),
+            "providers": dict(providers),
+            "missing_price_requests": total[5],
+        }
+
+    def breakdown(self, column: str) -> list[dict]:
+        allowed = {"provider", "provider_host", "model", "team", "feature", "user_id"}
+        if column not in allowed:
+            raise ValueError("Unsupported breakdown column")
+        with self.lock:
+            rows = self.connection.execute(
+                f"""
+                SELECT {column}, SUM(total_cost_usd), COUNT(*), SUM(input_tokens),
+                       SUM(cached_tokens), SUM(output_tokens)
+                FROM usage_events GROUP BY {column} ORDER BY SUM(total_cost_usd) DESC
+                """
+            ).fetchall()
+        return [
+            {
+                column: row[0],
+                "total_cost_usd": float(row[1]),
+                "request_count": row[2],
+                "input_tokens": row[3],
+                "cached_tokens": row[4],
+                "output_tokens": row[5],
+            }
+            for row in rows
+        ]
+
+    def requests(self, *, provider: str | None, limit: int, offset: int) -> dict:
+        with self.lock:
+            total = self.connection.execute(
+                "SELECT COUNT(*) FROM usage_events WHERE (? IS NULL OR lower(provider) = ?)",
+                [provider, provider],
+            ).fetchone()[0]
+            cursor = self.connection.execute(
+                """
+                SELECT request_id, provider, provider_host, provider_request_id, model,
+                       CAST(timestamp_utc AS VARCHAR) AS timestamp_utc,
+                       team, feature, user_id, env, input_tokens, output_tokens,
+                       cached_tokens, latency_ms, status, source, input_cost_usd,
+                       output_cost_usd, cached_cost_usd, total_cost_usd,
+                       missing_price, is_unattributed
+                FROM usage_events
+                WHERE (? IS NULL OR lower(provider) = ?)
+                ORDER BY timestamp_utc DESC, request_id
+                LIMIT ? OFFSET ?
+                """,
+                [provider, provider, limit, offset],
+            )
+            names = [item[0] for item in cursor.description]
+            rows = cursor.fetchall()
+        items = []
+        for row in rows:
+            item = dict(zip(names, row))
+            for key, value in item.items():
+                if key.endswith("_usd"):
+                    item[key] = float(value)
+            items.append(item)
+        return {"total": total, "limit": limit, "offset": offset, "items": items}

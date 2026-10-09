@@ -4,9 +4,10 @@ PROJECT SCRATCHPAD & FEATURE SPECIFICATION
 Challenge: PS-04 | Commvault Challenge | MITK AI Vision 24H Hackathon
 ================================================================================
 
-LAST UPDATED: 2026-10-09
+LAST UPDATED: 2026-10-10
 BRANCH: rahul
 TEST STATUS: 27 / 27 Pytest Unit & Integration Tests Passing (100%)
+DOM TEST: All Headless Chrome CDP Tests Passing (100%)
 FINANCIAL AUDIT: All Mathematical Invariants Reconciled & Verified
 
 --------------------------------------------------------------------------------
@@ -36,7 +37,7 @@ decisions.
 [Judging Criteria Check]
 - Attribution: Correctly assigns team/feature/user tags with fallback rules. [MET]
 - Cost accuracy: Reconciles calculated costs with agreed pricing table. [MET]
-- Provider coverage: Real OpenAI and Gemini forwarding with usage capture into persistent DuckDB. [IMPLEMENTED]
+- Provider coverage: Support at least two simulated/real provider formats. [MET: OpenAI + Gemini]
 - Usability: Make cost drivers and usage trends easy to interpret. [MET]
 
 --------------------------------------------------------------------------------
@@ -68,31 +69,33 @@ decisions.
 - Efficiency Gain: Uses DuckDB analytical views to process thousands of requests
   in under 50ms without database overhead.
 
-[FEATURE 3: Independent Reconciliation & Formal Audit Generator]
-- Files: core/reconciliation.py, scripts/run_independent_validation.py
-- Tools/Libraries: Pydantic, JSON manifest comparison, Markdown generator
-- Part It Plays: Trust & Compliance layer verifying calculated numbers against ground truth.
-- Problems Solved: Skepticism from finance and auditing teams regarding dashboard
-  accuracy; guarantees that analytics are not silently drifting.
-- How It Works: Runs an independent computation comparing calculated actuals with
-  data/golden_validation.json against a strict 0.01% tolerance gate. Performs 10
-  hand-calculated spot-checks and outputs reports/reconciliation_report.md.
-- Efficiency Gain: Automated one-click audit replaces hours of manual accounting checks.
+[FEATURE 3: Dual Provider Format Proxy Adapter & Persistent Usage Store]
+- Files: scripts/mock_proxy.py, core/usage_store.py
+- Tools/Libraries: FastAPI, httpx, DuckDB embedded SQL
+- Part It Plays: Live multi-provider reverse proxy and zero-prompt token store.
+- Problems Solved: Lack of live ingestion; inability to handle multiple provider schemas.
+- How It Works:
+  - OpenAI Format: /v1/chat/completions (choices, usage.prompt_tokens, etc.)
+  - Google Gemini Format: /v1beta/models/{model}:generateContent (usageMetadata)
+  - Records request IDs, models, tokens, and deterministic costs in a persistent
+    DuckDB ledger without storing private prompts or API keys.
+- Efficiency Gain: Zero-code integration by pointing SDK base URLs to the proxy;
+  direct DuckDB SQL aggregations avoid loading full dataframes into memory.
 
-[FEATURE 4: Executive Command Center Dashboard]
+[FEATURE 4: Streamlined Executive Dashboard (Trend View Optimized)]
 - Files: app.py, .streamlit/config.toml
 - Tools/Libraries: Streamlit, Plotly Express/Graph Objects, Custom SaaS CSS Theme
-- Part It Plays: Central user experience for engineering leaders and finance teams.
-- Problems Solved: Information overload and lack of actionable insights into LLM spend.
-- Workspaces:
-  1. Command Center: KPI strip, spend by team, token volume, model donut, team x model heatmap.
-  2. Spend Detective: Top cost driver root causes, user ranking, attribution integrity.
-  3. Savings Lab: "What-If" interactive model-swap simulator calculating exact dollar savings.
-  4. Trend: Daily/Hourly time series, formal reconciliation report download.
-  5. Request Logs: Searchable, paginated audit ledger with secure CSV export.
-  6. Settings: Model pricing rate card, taxonomy rules, live budget guardrails table.
-- Efficiency Gain: Interactive What-If simulator allows instant ROI analysis before
-  migrating production workloads to cheaper models.
+- Part It Plays: Interactive visual cockpit for engineering and finance teams.
+- Problems Solved: Cluttered views; separated pure time-series trend analysis from
+  heavy audit tables for a cleaner, faster user experience.
+- Recent Refinement:
+  - Removed "Hand-Calculated Spot-Check Audit (10 Samples)", "Reconciliation Check
+    Table", and "Financial Trust & Invariant Verification" from the Trend tab.
+  - The Trend tab is now 100% focused on hourly/daily spend dynamics, model usage
+    evolution, and feature workload breakdown.
+  - Formal reconciliation and invariant verification remain fully accessible via
+    scripts/run_independent_validation.py, reports/reconciliation_report.md, and
+    the /api/v1/reconciliation REST endpoint.
 
 [FEATURE 5: Demonstration Security & Access Control (P0 Scope)]
 - Files: api/main.py, .streamlit/config.toml
@@ -129,32 +132,19 @@ decisions.
 - Efficiency Gain: Shifts FinOps from reactive end-of-month reporting to real-time
   proactive cost prevention.
 
+[FEATURE 8: Headless Chrome DOM Verification Test Suite]
+- Files: tests/dom_test.py
+- Tools/Libraries: Chrome DevTools Protocol (CDP), websockets, Python asyncio
+- Part It Plays: End-to-end browser and DOM testing for Streamlit applications.
+- Problems Solved: UI regression bugs, unrendered React DOM components, broken tabs.
+- How It Works: Launches Chrome in headless mode on port 9222, connects via WebSocket,
+  and verifies title, H1 headers, KPI values, buttons, and tab clicks dynamically.
+
 --------------------------------------------------------------------------------
 3. WHAT SHOULD BE DONE NEXT (ROADMAP TO WIN HACKATHON JUDGING)
 --------------------------------------------------------------------------------
 
-[COMPLETED ITEM 1: OpenAI + Gemini Provider Usage Proxy]
-- Target Files: scripts/mock_proxy.py, core/proxy_adapter.py, tests/test_proxy.py
-- Judging Criterion Addressed: "Provider coverage: Support at least two simulated or
-  real provider formats where feasible."
-- Problem It Solves: Real-world organizations use multiple LLM providers (e.g.,
-  OpenAI GPT-4o Mini and Gemini 2.5 Flash). Each provider uses different
-  payload schemas:
-  - OpenAI: /v1/chat/completions -> {"messages": [...], "model": "gpt-4o"}
-    Response: {"choices": [{"message": ...}], "usage": {"prompt_tokens", "completion_tokens"}}
-  - Gemini: /v1beta/models/{model}:generateContent -> {"contents": [...]}.
-    Response usage is returned in usageMetadata.
-- What Needs To Be Done:
-  The proxy forwards real requests using OPENAI_API_KEY and GEMINI_API_KEY (or
-  GOOGLE_API_KEY), extracts provider usage, calculates costs, adds attribution
-  headers, and persists usage rows in data/tokenlens_usage.duckdb.
-- Model/Service Integration:
-  - OpenAI endpoint: /v1/chat/completions
-  - Gemini endpoint: /v1beta/models/{model}:generateContent
-- Efficiency Impact: Enables zero-code-change drop-in proxy replacement by setting
-  their provider base URL to TokenLens.
-
-[NEXT ITEM 2: Semantic Prompt Cache & Prefix Redundancy Analyzer]
+[NEXT ITEM 1: Semantic Prompt Cache & Prefix Redundancy Analyzer]
 - Target Files: core/cache_analyzer.py, app.py
 - Problem It Solves: Up to 50-80% of enterprise LLM spend is burned on redundant,
   repetitive system prompts sent thousands of times without prompt caching.
@@ -166,7 +156,7 @@ decisions.
 - Efficiency Impact: Identifies immediate 50-70% margin improvements without
   switching models.
 
-[NEXT ITEM 3: Pre-Flight Token Estimator (Deterministic BPE Tokenizer)]
+[NEXT ITEM 2: Pre-Flight Token Estimator (Deterministic BPE Tokenizer)]
 - Target Files: core/tokenizer.py
 - Problem It Solves: Character count heuristics (len/4) can have 15-25% estimation
   error, leading to inaccurate pre-flight cost estimations.
@@ -175,7 +165,7 @@ decisions.
   for exact pre-flight cost calculation before making the API call.
 - Efficiency Impact: 100% deterministic pre-flight cost predictability.
 
-[NEXT ITEM 4: Webhook & Slack Incident Dispatcher]
+[NEXT ITEM 3: Webhook & Slack Incident Dispatcher]
 - Target Files: core/notifications.py, api/main.py
 - Problem It Solves: Anomaly alerts currently require checking the dashboard.
 - What Needs To Be Done:
@@ -189,9 +179,10 @@ Component                | Primary Tool/Engine       | Key Efficiency Technique
 -------------------------+---------------------------+--------------------------
 Attribution Parser       | PyYAML + Regex Aliases    | Single-pass normalization
 Cost Engine              | Python Decimal + DuckDB   | Fixed-point math, 0 drift
-Reconciliation Engine    | JSON Expected Manifest    | Vectorized comparison
+Usage Store              | DuckDB Embedded SQL       | Direct SQL rollups, no pandas RAM bloat
 Anomaly Detector         | NumPy Z-Scores + IQR      | Dynamic baseline fencing
 Budget Guardrails        | Pydantic v2 + REST API    | O(1) in-memory thresholding
-Interactive UI           | Streamlit + Plotly        | Cached frames & session state
+Interactive UI           | Streamlit + Plotly        | Streamlined Trend charts, cached frames
 Backend API              | FastAPI + Uvicorn + httpx | Async ASGI, streaming body cap
+DOM Test Suite           | Chrome CDP + websockets   | Native headless browser assertion
 ================================================================================
