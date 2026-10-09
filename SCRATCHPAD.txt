@@ -6,9 +6,9 @@ Challenge: PS-04 | Commvault Challenge | MITK AI Vision 24H Hackathon
 
 LAST UPDATED: 2026-10-10
 BRANCH: rahul
-TEST STATUS: 27 / 27 Pytest Unit & Integration Tests Passing (100%)
+TEST STATUS: 33 / 33 Pytest Unit & Integration Tests Passing (100%)
 DOM TEST: All Headless Chrome CDP Tests Passing (100%)
-FINANCIAL AUDIT: All Mathematical Invariants Reconciled & Verified
+FINANCIAL AUDIT: All Mathematical Invariants Reconciled & Verified ($28.3345)
 
 --------------------------------------------------------------------------------
 1. HACKATHON PROBLEM STATEMENT & JUDGING CRITERIA MAPPING
@@ -37,7 +37,7 @@ decisions.
 [Judging Criteria Check]
 - Attribution: Correctly assigns team/feature/user tags with fallback rules. [MET]
 - Cost accuracy: Reconciles calculated costs with agreed pricing table. [MET]
-- Provider coverage: Support at least two simulated/real provider formats. [MET: OpenAI + Gemini]
+- Provider coverage: Support at least two simulated/real provider formats. [MET: OpenAI, Gemini, Anthropic Dummy]
 - Usability: Make cost drivers and usage trends easy to interpret. [MET]
 
 --------------------------------------------------------------------------------
@@ -69,33 +69,37 @@ decisions.
 - Efficiency Gain: Uses DuckDB analytical views to process thousands of requests
   in under 50ms without database overhead.
 
-[FEATURE 3: Dual Provider Format Proxy Adapter & Persistent Usage Store]
-- Files: scripts/mock_proxy.py, core/usage_store.py
-- Tools/Libraries: FastAPI, httpx, DuckDB embedded SQL
-- Part It Plays: Live multi-provider reverse proxy and zero-prompt token store.
-- Problems Solved: Lack of live ingestion; inability to handle multiple provider schemas.
+[FEATURE 3: Focused 3-Model Registry Architecture & Dual-Mode Routing]
+- Files: data/model_pricing.csv, scripts/mock_proxy.py, core/usage_store.py
+- Models in Active Registry:
+  1. gpt-4o (OpenAI / ChatGPT) -> 🟢 Real-Time API Key Usage (OPENAI_API_KEY)
+     Rates: $2.50 input / $10.00 output / $1.25 cached per 1M tokens.
+  2. gemini-1.5-flash (Google / Gemini) -> 🟢 Real-Time API Key Usage (GEMINI_API_KEY)
+     Rates: $0.075 input / $0.30 output / $0.01875 cached per 1M tokens.
+  3. claude-3-5-sonnet (Anthropic) -> 🟣 Dummy / Synthetic Workload (No API Key Required)
+     Rates: $3.00 input / $15.00 output / $0.30 cached per 1M tokens.
+- Problems Solved: Redundant model proliferation; provides pure real-time API
+  tracking for production models while maintaining zero-cost synthetic dummy
+  telemetry for stress testing, pre-deployment simulation, and feature prototyping.
 - How It Works:
-  - OpenAI Format: /v1/chat/completions (choices, usage.prompt_tokens, etc.)
-  - Google Gemini Format: /v1beta/models/{model}:generateContent (usageMetadata)
-  - Records request IDs, models, tokens, and deterministic costs in a persistent
-    DuckDB ledger without storing private prompts or API keys.
-- Efficiency Gain: Zero-code integration by pointing SDK base URLs to the proxy;
-  direct DuckDB SQL aggregations avoid loading full dataframes into memory.
+  - Real-Time Mode: Forwards requests for gpt-4o and gemini-1.5-flash directly
+    upstream when credentials are provided, captures returned token usage headers,
+    computes exact cost, and commits auditable records to local DuckDB.
+  - Dummy Data Mode: Intercepts requests for claude-3-5-sonnet via OpenAI-compatible
+    endpoint or Anthropic /v1/messages, generates synthetic assistant completions,
+    calculates deterministic token counts, and stamps X-FinOps-Dummy-Mode: true.
 
-[FEATURE 4: Streamlined Executive Dashboard (Trend View Optimized)]
+[FEATURE 4: Streamlined Executive Dashboard (Settings & Rate Card Integrated)]
 - Files: app.py, .streamlit/config.toml
 - Tools/Libraries: Streamlit, Plotly Express/Graph Objects, Custom SaaS CSS Theme
 - Part It Plays: Interactive visual cockpit for engineering and finance teams.
-- Problems Solved: Cluttered views; separated pure time-series trend analysis from
-  heavy audit tables for a cleaner, faster user experience.
-- Recent Refinement:
-  - Removed "Hand-Calculated Spot-Check Audit (10 Samples)", "Reconciliation Check
-    Table", and "Financial Trust & Invariant Verification" from the Trend tab.
-  - The Trend tab is now 100% focused on hourly/daily spend dynamics, model usage
-    evolution, and feature workload breakdown.
-  - Formal reconciliation and invariant verification remain fully accessible via
-    scripts/run_independent_validation.py, reports/reconciliation_report.md, and
-    the /api/v1/reconciliation REST endpoint.
+- Problems Solved: Transparent operational status; shows at a glance which models
+  run with live API credentials vs synthetic simulation.
+- Capabilities:
+  - Settings workspace displays model rate cards with visual source badges.
+  - Live API key configuration and verification inputs for OpenAI and Gemini.
+  - One-click synthetic request injection for claude-3-5-sonnet with instant
+    deterministic cost computation and attribution update.
 
 [FEATURE 5: Demonstration Security & Access Control (P0 Scope)]
 - Files: api/main.py, .streamlit/config.toml
@@ -107,7 +111,6 @@ decisions.
   callers with HTTP 403 when FINOPS_API_TOKEN is unset; validates Bearer tokens
   using constant-time secrets.compare_digest; caps request bodies at 64 KiB;
   requires explicit operator confirmation checkboxes before exporting logs/audits.
-- Efficiency Gain: Secure by default; protects server resources from malicious floods.
 
 [FEATURE 6: Statistical Anomaly Detection Engine (FR-09)]
 - Files: core/anomaly_engine.py, tests/test_guardrails_anomaly.py
@@ -119,7 +122,6 @@ decisions.
   1. Cost Spikes: Evaluates Z-scores per request; flags items > 3.0 sigma as anomalies.
   2. Prompt Bloat: Evaluates Upper IQR Fences (Q75 + 3.0*IQR); detects abnormal prompt bloat.
   3. Runaway Users: Detects user concentration where a single user drives >20% of spend.
-- Efficiency Gain: Proactive notification prevents runaway costs before monthly billing.
 
 [FEATURE 7: FinOps Budget Guardrails & Policy Enforcement (FR-10)]
 - Files: core/guardrails.py, api/main.py (/api/v1/guardrails, /api/v1/guardrails/check)
@@ -129,8 +131,6 @@ decisions.
 - How It Works: Tracks team-level monthly quotas, warning thresholds (80%), and
   critical limits (100%). Provides /api/v1/guardrails/check to evaluate potential
   requests and return ALLOW, WARN, or BLOCK before calling expensive LLM APIs.
-- Efficiency Gain: Shifts FinOps from reactive end-of-month reporting to real-time
-  proactive cost prevention.
 
 [FEATURE 8: Headless Chrome DOM Verification Test Suite]
 - Files: tests/dom_test.py
@@ -138,7 +138,8 @@ decisions.
 - Part It Plays: End-to-end browser and DOM testing for Streamlit applications.
 - Problems Solved: UI regression bugs, unrendered React DOM components, broken tabs.
 - How It Works: Launches Chrome in headless mode on port 9222, connects via WebSocket,
-  and verifies title, H1 headers, KPI values, buttons, and tab clicks dynamically.
+  and verifies title, H1 headers, KPI values, buttons, Spend Detective triage,
+  Settings guardrails, and presence of all 3 models (gpt-4o, gemini-1.5-flash, claude-3-5-sonnet).
 
 --------------------------------------------------------------------------------
 3. WHAT SHOULD BE DONE NEXT (ROADMAP TO WIN HACKATHON JUDGING)
@@ -180,6 +181,7 @@ Component                | Primary Tool/Engine       | Key Efficiency Technique
 Attribution Parser       | PyYAML + Regex Aliases    | Single-pass normalization
 Cost Engine              | Python Decimal + DuckDB   | Fixed-point math, 0 drift
 Usage Store              | DuckDB Embedded SQL       | Direct SQL rollups, no pandas RAM bloat
+Proxy Adapter            | FastAPI + httpx           | Real-time forwarding + dummy simulation
 Anomaly Detector         | NumPy Z-Scores + IQR      | Dynamic baseline fencing
 Budget Guardrails        | Pydantic v2 + REST API    | O(1) in-memory thresholding
 Interactive UI           | Streamlit + Plotly        | Streamlined Trend charts, cached frames

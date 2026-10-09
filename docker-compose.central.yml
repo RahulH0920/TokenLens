@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tokenlens}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-tokenlens_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in central.env}
+      CENTRAL_DB_PASSWORD: ${CENTRAL_DB_PASSWORD:?Set CENTRAL_DB_PASSWORD in central.env}
+    volumes:
+      - tokenlens_central_pgdata:/var/lib/postgresql/data
+      - ./central/postgres-init.sql:/docker-entrypoint-initdb.d/10-tokenlens-role.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - central-internal
+
+  central-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.central
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-tokenlens}
+      PGUSER: tokenlens_ingest
+      PGPASSWORD: ${CENTRAL_DB_PASSWORD:?Set CENTRAL_DB_PASSWORD in central.env}
+      CENTRAL_INGEST_TOKENS_JSON: ${CENTRAL_INGEST_TOKENS_JSON:?Set a separate token for each host in central.env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${CENTRAL_BIND_HOST:-127.0.0.1}:${CENTRAL_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - central-internal
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["remote"]
+    restart: unless-stopped
+    environment:
+      CENTRAL_DOMAIN: ${CENTRAL_DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./central/Caddyfile:/etc/caddy/Caddyfile:ro
+      - tokenlens_caddy_data:/data
+      - tokenlens_caddy_config:/config
+    depends_on:
+      central-api:
+        condition: service_healthy
+    networks:
+      - central-internal
+
+networks:
+  central-internal:
+    driver: bridge
+
+volumes:
+  tokenlens_central_pgdata:
+  tokenlens_caddy_data:
+  tokenlens_caddy_config:

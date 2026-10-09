@@ -178,18 +178,63 @@ curl http://127.0.0.1:8000/v1beta/models/gemini-2.5-flash:generateContent \
   -d '{"contents":[{"role":"user","parts":[{"text":"Explain a hash map briefly."}]}]}'
 ```
 
-### 6. (Optional) Verify an individual DuckDB client against PostgreSQL
+### 6. Central PostgreSQL receiver for multiple hosts
 
-DuckDB and its PostgreSQL extension are already included in the Python setup used here. On a new machine, install project dependencies, then install/load the extension once:
+Each host keeps its request ledger in local DuckDB. The local proxy sends only unsynced usage rows to this central PostgreSQL service over HTTPS; it does not transfer DuckDB files, prompts, or provider API keys. PostgreSQL deduplicates retries by `(host_id, request_id)`, and each host has a separate bearer token.
 
-```powershell
-python -c "import duckdb; c=duckdb.connect(); c.execute('INSTALL postgres'); c.execute('LOAD postgres')"
-```
+#### Start the central server
 
-Set `PGHOST`, `PGPORT` (defaults to 5432), `PGDATABASE`, `PGUSER`, and `PGPASSWORD` in that machine's protected environment or secret manager, then run:
+Docker Compose runs PostgreSQL and the authenticated receiver. PostgreSQL is on a private Compose network and has no published host port. The receiver binds to loopback by default.
 
 ```powershell
-python scripts/check_postgres_connection.py
+Copy-Item central.env.example central.env
 ```
 
-The check attaches PostgreSQL read-only and does not print credentials. For a remote host, set `PGSSLMODE=verify-full` and configure the server certificate trust. Use a dedicated PostgreSQL role with read-only grants for individual analytics clients; do not distribute an owner/admin account. The check requires a reachable server, correct firewall rules, and the connection details above.
+Edit `central.env`: use unique strong passwords, replace both host token examples with independent random values, and add an entry for every host. Generate random values locally with:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Start for local use:
+
+```powershell
+docker compose --env-file central.env -f docker-compose.central.yml up -d --build
+Invoke-RestMethod http://127.0.0.1:8080/health
+```
+
+For remote hosts, set `CENTRAL_DOMAIN` to a DNS name pointing to the central server, allow inbound ports 80 and 443, and start the Caddy TLS reverse proxy profile:
+
+```powershell
+docker compose --env-file central.env -f docker-compose.central.yml --profile remote up -d --build
+```
+
+Caddy obtains and renews the HTTPS certificate. Remote hosts should use the HTTPS domain; keep the PostgreSQL port private and do not expose the receiver over plain HTTP. Persistent PostgreSQL and certificate data use named Docker volumes.
+
+#### Configure each host and sync its DuckDB ledger
+
+On each host, set its unique host ID and the matching token from `CENTRAL_INGEST_TOKENS_JSON` before starting the local proxy:
+
+```powershell
+$env:FINOPS_HOST_ID = "host-01"
+$env:FINOPS_CENTRAL_TOKEN = "<the token configured for host-01>"
+$env:FINOPS_CENTRAL_URL = "https://finops.example.com"
+$env:FINOPS_DUCKDB_PATH = "data/tokenlens_usage.duckdb"
+python scripts/mock_proxy.py
+```
+
+The central credentials stay in the proxy process environment. The local ledger marks rows synced only after PostgreSQL acknowledges a batch. To flush pending rows while the proxy is running, run this on that host (also set `FINOPS_API_TOKEN` in the shell if the local proxy requires it):
+
+```powershell
+python scripts/sync_duckdb_to_central.py
+```
+
+Schedule that command at the desired interval. If a response is lost, the next run retries safely; PostgreSQL ignores already received rows. Batch size is capped at 500. The central table is `tokenlens.usage_events`; inspect per-host totals with:
+
+```powershell
+docker compose --env-file central.env -f docker-compose.central.yml exec postgres psql -U tokenlens_admin -d tokenlens -c "SELECT host_id, COUNT(*) AS requests, SUM(total_cost_usd) AS spend_usd FROM tokenlens.usage_events GROUP BY host_id ORDER BY host_id"
+```
+
+The receiver checks a host ID against its configured token before accepting data, caps request size, validates token and timestamp fields, and uses parameterized SQL. The database application role is separate from the PostgreSQL bootstrap administrator. Set `FINOPS_CENTRAL_CA_BUNDLE` on a host only when its trusted certificate authority is not in the system bundle.
+
+The optional `scripts/check_postgres_connection.py` remains for deployments that separately grant direct PostgreSQL access. It verifies a read-only DuckDB attachment; it does not bypass the central receiver or open the Compose database port.

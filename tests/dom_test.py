@@ -138,15 +138,17 @@ async def run_dom_test():
             clicked = click_eval.get("result", {}).get("value")
             if clicked:
                 print("[PASS] Successfully triggered click on 'Spend Detective'")
-                await asyncio.sleep(2.0)
-
-                # Check if DOM updated with Anomaly & Outlier section
-                eval_anom = await send_cmd("Runtime.evaluate", {
-                    "expression": """
-                    document.body.innerText.includes('Anomaly & Outlier') || document.body.innerText.includes('Active Anomalies')
-                    """
-                })
-                has_anom = eval_anom.get("result", {}).get("value")
+                has_anom = False
+                for _ in range(10):
+                    await asyncio.sleep(0.5)
+                    eval_anom = await send_cmd("Runtime.evaluate", {
+                        "expression": """
+                        document.body.innerText.includes('Anomaly & Outlier') || document.body.innerText.includes('Active Anomalies')
+                        """
+                    })
+                    if eval_anom.get("result", {}).get("value"):
+                        has_anom = True
+                        break
                 print(f"[PASS] Real-Time Anomaly & Outlier section verified in DOM: {has_anom}")
             else:
                 print("[INFO] Direct button click skipped or segmented control used.")
@@ -174,6 +176,26 @@ async def run_dom_test():
                 })
                 has_guardrails = eval_settings.get("result", {}).get("value")
                 print(f"[PASS] Team Quota Guardrails & Pricing verified in DOM: {has_guardrails}")
+
+                eval_models = await send_cmd("Runtime.evaluate", {
+                    "expression": """
+                    (() => {
+                        const text = document.body.innerText;
+                        return {
+                            has_gpt4o: text.includes('gpt-4o'),
+                            has_gemini: text.includes('gemini-1.5-flash'),
+                            has_claude: text.includes('claude-3-5-sonnet'),
+                            has_realtime_badge: text.includes('Real-Time API Key'),
+                            has_dummy_badge: text.includes('Dummy Data AI Model')
+                        };
+                    })()
+                    """,
+                    "returnByValue": True
+                })
+                m_info = eval_models.get("result", {}).get("value", {})
+                print(f"[PASS] 3-Model Registry in DOM: gpt-4o={m_info.get('has_gpt4o')}, gemini={m_info.get('has_gemini')}, claude={m_info.get('has_claude')}")
+                print(f"[PASS] Provider Operation Badges: Real-Time={m_info.get('has_realtime_badge')}, Dummy-Mode={m_info.get('has_dummy_badge')}")
+                assert m_info.get('has_gpt4o') and m_info.get('has_gemini') and m_info.get('has_claude'), "All 3 models must be in DOM"
 
             print("\n=== DOM TEST COMPLETED SUCCESSFULLY ===")
             return True

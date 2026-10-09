@@ -2,7 +2,7 @@
 
 > **Challenge:** PS-04 | Commvault Challenge | MITK AI Vision 24H Hackathon  
 > **Topic:** LLM FinOps Dashboard — Attribute LLM usage and cost to teams, features, and users  
-> **Status:** 27 / 27 Pytest Tests Passing (100%) · DOM Headless Chrome Tests Passing (100%) · Branch: `rahul`
+> **Status:** 33 / 33 Pytest Tests Passing (100%) · DOM Headless Chrome Tests Passing (100%) · Branch: `rahul`
 
 ---
 
@@ -14,36 +14,38 @@
 | **2. Cost & Usage Calculations with Pricing Table** | **Complete (100%)** — Deterministic `Decimal` fixed-point math ($C_{\text{input}} + C_{\text{output}} + C_{\text{cached}}$), missing pricing alerts, DuckDB views. | [core/cost_engine.py](file:///d:/LLM_FINOPS/TokenLens/core/cost_engine.py), [data/model_pricing.csv](file:///d:/LLM_FINOPS/TokenLens/data/model_pricing.csv) |
 | **3. Interactive Dashboard with Multi-Dimensional Breakdown** | **Complete (100%)** — 6 dedicated workspaces: Command Center, Spend Detective, Savings Lab, Trend, Request Logs, Settings. | [app.py](file:///d:/LLM_FINOPS/TokenLens/app.py) |
 | **4. Validation Report Comparing Expected Manifest** | **Complete (100%)** — Independent reconciliation engine verifying actuals vs golden manifest within 0.01% tolerance; 10 spot-checks. | [core/reconciliation.py](file:///d:/LLM_FINOPS/TokenLens/core/reconciliation.py), [reports/reconciliation_report.md](file:///d:/LLM_FINOPS/TokenLens/reports/reconciliation_report.md) |
-| **5. Provider Coverage: Support $\ge 2$ Provider Formats** | **Complete (100%)** — Dual-format reverse proxy in [scripts/mock_proxy.py](file:///d:/LLM_FINOPS/TokenLens/scripts/mock_proxy.py) supporting **OpenAI** (`/v1/chat/completions`) and **Google Gemini** (`/v1beta/models/{model}:generateContent`). | [scripts/mock_proxy.py](file:///d:/LLM_FINOPS/TokenLens/scripts/mock_proxy.py), [core/usage_store.py](file:///d:/LLM_FINOPS/TokenLens/core/usage_store.py) |
+| **5. Provider Coverage: Support $\ge 2$ Provider Formats** | **Complete (100%)** — Focused 3-model architecture: Real-time API key tracking for **Gemini** (`gemini-1.5-flash`) and **ChatGPT** (`gpt-4o`), plus zero-cost synthetic dummy telemetry for **Claude** (`claude-3-5-sonnet`). | [scripts/mock_proxy.py](file:///d:/LLM_FINOPS/TokenLens/scripts/mock_proxy.py), [core/usage_store.py](file:///d:/LLM_FINOPS/TokenLens/core/usage_store.py) |
 | **6. Usability: Cost Drivers & Trends Easy to Interpret** | **Complete (100%)** — Streamlined time-series views, KPI cards, What-If model swap simulator, heatmaps, and outlier triage feed. | [app.py](file:///d:/LLM_FINOPS/TokenLens/app.py) |
 
 ---
 
 ## 2. Present Features (Already Built & Working)
 
-### 1. Configurable Attribution & Ingestion Engine
-- **Tools Used:** `Pydantic v2`, `PyYAML`, `Pandas`
-- **What Part It Plays:** The front-line ingestion gateway for raw logs and live proxy calls.
-- **Problems Solved:** Eliminates "shadow AI" by automatically attributing requests; resolves inconsistent naming (`"eng"`, `"Engineering"`, `"ENGINEERING"`) into canonical taxonomies; flags missing tags as `unattributed`.
-- **Efficiency:** Sub-millisecond in-memory parsing with regex alias tables.
+### 1. Focused 3-Model Registry Architecture & Dual-Mode Routing
+- **Active Models:**
+  1. `gpt-4o` (OpenAI / ChatGPT): 🟢 **Real-Time API Key Usage** (`OPENAI_API_KEY`) — Rate: $2.50 in / $10.00 out / $1.25 cached per 1M.
+  2. `gemini-1.5-flash` (Google / Gemini): 🟢 **Real-Time API Key Usage** (`GEMINI_API_KEY`) — Rate: $0.075 in / $0.30 out / $0.01875 cached per 1M.
+  3. `claude-3-5-sonnet` (Anthropic): 🟣 **Dummy Data Mode** (No API Key Required) — Rate: $3.00 in / $15.00 out / $0.30 cached per 1M.
+- **Problems Solved:** Clean model registry without legacy clutter; live production tracking for primary LLMs while preserving synthetic dummy telemetry for development, load testing, and offline benchmarking.
+- **Routing Implementation:**
+  - Real-time models forward upstream via `httpx` to `api.openai.com` and `generativelanguage.googleapis.com`, capturing real-time token metrics into DuckDB.
+  - Dummy model simulates assistant responses and realistic token usage without needing an API key, returning `X-FinOps-Dummy-Mode: true`.
 
-### 2. Deterministic Decimal Cost Engine & Invariant Verifier
+### 2. Configurable Attribution & Ingestion Engine
+- **Tools Used:** `Pydantic v2`, `PyYAML`, `Pandas`
+- **What Part It Plays:** Ingestion gateway for raw logs and live proxy calls.
+- **Problems Solved:** Eliminates "shadow AI" by automatically attributing requests; resolves inconsistent naming (`"eng"`, `"Engineering"`, `"ENGINEERING"`) into canonical taxonomies; flags missing tags as `unattributed`.
+
+### 3. Deterministic Decimal Cost Engine & Invariant Verifier
 - **Tools Used:** Python `Decimal` (`ROUND_HALF_UP`), `DuckDB` SQL engine
 - **What Part It Plays:** Financial calculation engine computing deterministic spend down to 6 decimal places.
 - **Problems Solved:** Prevents floating-point rounding errors and silent zeroes on newly launched/unpriced models; strictly enforces mathematical invariants:
   $$\sum \text{Team Spend} = \sum \text{Model Spend} = \sum \text{Date Spend} = \text{Grand Total}$$
-- **Efficiency:** Uses DuckDB vectorized aggregation to process thousands of requests in $<50\text{ ms}$.
-
-### 3. Dual-Format Provider Proxy & Persistent Usage Store
-- **Tools Used:** `FastAPI`, `httpx`, `DuckDB` embedded SQL
-- **What Part It Plays:** Live multi-provider reverse proxy and prompt-safe token ledger.
-- **Problems Solved:** Enables live application ingestion across both OpenAI and Google Gemini formats; avoids storing sensitive prompt text or credentials.
-- **Efficiency:** Direct DuckDB SQL aggregations for `/usage/summary`, `/usage/breakdown`, and paginated records eliminate in-memory pandas overhead.
 
 ### 4. Streamlined Executive Command Center Dashboard
 - **Tools Used:** `Streamlit`, `Plotly`, Custom SaaS CSS Design System
 - **What Part It Plays:** Interactive command center for FinOps practitioners, engineering leads, and CFOs.
-- **Recent Refinement:** Removed heavy reconciliation tables from the `Trend` tab so the workspace remains dedicated to pure hourly/daily spend dynamics, model usage evolution, and feature workload breakdowns. Formal audit verification remains fully available via CLI (`python scripts/run_independent_validation.py`) and API (`/api/v1/reconciliation`).
+- **Settings Workspace Integration:** Displays model rate cards with visual source badges (`Real-Time API Key` vs `Dummy Data Mode`), live credential configuration inputs for OpenAI and Gemini, and one-click synthetic Claude request injection.
 
 ### 5. Production Security & Access Controls (Phase 3 P0 Scope)
 - **Tools Used:** `FastAPI`, `Starlette`, `secrets`, `TrustedHostMiddleware`, `CORSMiddleware`
@@ -66,7 +68,7 @@
 ### 8. Headless Chrome DOM Verification Test Suite
 - **Tools Used:** Chrome DevTools Protocol (CDP), `websockets`, `asyncio`
 - **What Part It Plays:** Automated end-to-end browser DOM test in [tests/dom_test.py](file:///d:/LLM_FINOPS/TokenLens/tests/dom_test.py).
-- **Problems Solved:** Validates full React DOM mounting, H1 headers, KPI values, and tab interactions directly on the live dashboard.
+- **Problems Solved:** Validates full React DOM mounting, H1 headers, KPI values, tab interactions, and presence of all 3 models directly on the live dashboard.
 
 ---
 
@@ -99,6 +101,7 @@
 | **Attribution Parser** | `PyYAML` + Regex Aliasing | Single-pass regex compilation |
 | **Cost Engine** | `Decimal` + `DuckDB` | Zero floating-point drift, in-memory vectorized SQL |
 | **Usage Store** | `DuckDB` Embedded SQL | Direct SQL rollups without loading full dataframes |
+| **Proxy Adapter** | `FastAPI` + `httpx` | Real-time upstream forwarding + dummy simulation |
 | **Anomaly Detector** | `NumPy` Z-Scores + IQR | Dynamic baseline fencing without arbitrary thresholds |
 | **Budget Guardrails** | `Pydantic` + REST API | $O(1)$ in-memory quota checking |
 | **Security Middleware** | `Starlette` + `secrets` | Constant-time auth checks, streaming body limits |

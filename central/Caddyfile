@@ -1,0 +1,3 @@
+{$CENTRAL_DOMAIN} {
+	reverse_proxy central-api:8080
+}

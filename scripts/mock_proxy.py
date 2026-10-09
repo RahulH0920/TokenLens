@@ -24,6 +24,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from core.attribution import AttributionParser
+from core.central_sync import sync_usage_store
 from core.cost_engine import CostEngine
 from core.importer import DataImporter
 from core.models import RequestRecord
@@ -59,14 +60,23 @@ write_lock = RLock()
 
 OPENAI_HOST = "api.openai.com"
 GEMINI_HOST = "generativelanguage.googleapis.com"
+ANTHROPIC_HOST = "api.anthropic.com (dummy-simulator)"
 OPENAI_CHAT_URL = f"https://{OPENAI_HOST}/v1/chat/completions"
 GEMINI_API_ROOT = f"https://{GEMINI_HOST}/v1beta/models"
+
+ACTIVE_MODELS = {
+    "gpt-4o": {"provider": "openai", "mode": "real-time"},
+    "gemini-1.5-flash": {"provider": "google", "mode": "real-time"},
+    "claude-3-5-sonnet": {"provider": "anthropic", "mode": "dummy-data"},
+}
 
 
 def _api_key(provider: str) -> str | None:
     if provider == "openai":
         return os.getenv("OPENAI_API_KEY")
-    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if provider in {"gemini", "google"}:
+        return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    return None
 
 
 def _attribution(
@@ -142,6 +152,11 @@ def _record_usage(
             output_tokens = int(usage["completion_tokens"])
             details = usage.get("prompt_tokens_details") or {}
             cached_tokens = int(details.get("cached_tokens", 0) or 0)
+        elif provider == "anthropic":
+            prompt_total = int(usage.get("prompt_tokens") or usage.get("input_tokens", 0))
+            output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens", 0))
+            details = usage.get("prompt_tokens_details") or {}
+            cached_tokens = int(details.get("cached_tokens") or usage.get("cache_read_input_tokens", 0) or 0)
         else:
             prompt_total = int(usage["promptTokenCount"])
             output_tokens = int(usage.get("candidatesTokenCount", 0) or 0)
@@ -261,12 +276,100 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": "tokenlens-provider-usage-proxy",
+        "models": {
+            "chatgpt": {
+                "model": "gpt-4o",
+                "provider": "openai",
+                "mode": "real-time",
+                "configured": bool(_api_key("openai")),
+            },
+            "gemini": {
+                "model": "gemini-1.5-flash",
+                "provider": "google",
+                "mode": "real-time",
+                "configured": bool(_api_key("google")),
+            },
+            "claude": {
+                "model": "claude-3-5-sonnet",
+                "provider": "anthropic",
+                "mode": "dummy-data",
+                "configured": True,
+            },
+        },
         "providers": {
             "openai": bool(_api_key("openai")),
-            "gemini": bool(_api_key("gemini")),
+            "gemini": bool(_api_key("google")),
+            "anthropic": True,
         },
         "stored_usage_records": store.count(),
     }
+
+
+def _generate_dummy_completion(
+    model: str,
+    body: dict[str, Any],
+    response: Response,
+    x_team: str | None,
+    x_feature: str | None,
+    x_user: str | None,
+    x_env: str | None,
+) -> JSONResponse:
+    """Generate synthetic responses & dummy usage for the 3rd model (claude-3-5-sonnet)."""
+    import random
+
+    clean_model = "claude-3-5-sonnet"
+    messages = body.get("messages") or []
+    msg_len = sum(len(str(m.get("content", ""))) for m in messages) if messages else 400
+    prompt_tokens = max(150, int(msg_len / 3.8) + random.randint(100, 300))
+    completion_tokens = random.randint(180, 520)
+    cached_tokens = int(prompt_tokens * 0.25) if random.random() < 0.4 else 0
+    elapsed_ms = random.randint(320, 890)
+
+    dummy_content = (
+        "TokenLens Dummy AI Model [claude-3-5-sonnet]: This synthetic workload response "
+        "is simulated for FinOps telemetry and testing without incurring upstream provider costs."
+    )
+    result = {
+        "id": f"chatcmpl-dummy-{uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(datetime.now(timezone.utc).timestamp()),
+        "model": clean_model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": dummy_content,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "prompt_tokens_details": {
+                "cached_tokens": cached_tokens,
+            },
+        },
+    }
+
+    response.headers["X-FinOps-Dummy-Mode"] = "true"
+    finops = _record_usage(
+        provider="anthropic",
+        model=clean_model,
+        provider_host=ANTHROPIC_HOST,
+        provider_request_id=result["id"],
+        usage=result["usage"],
+        team=x_team,
+        feature=x_feature,
+        user=x_user,
+        env=x_env,
+        elapsed_ms=elapsed_ms,
+        response=response,
+    )
+    result["finops_attribution"] = finops
+    return JSONResponse(content=result, headers=dict(response.headers))
 
 
 @app.post("/v1/chat/completions")
@@ -278,11 +381,30 @@ def openai_chat_completions(
     x_user: str | None = Header(default=None),
     x_env: str | None = Header(default="production"),
 ) -> JSONResponse:
-    """Forward an OpenAI Chat Completions request and capture returned usage."""
+    """Forward an OpenAI Chat Completions request or simulate dummy model."""
     model = _validate_body(body, "openai")
+    clean_model = model.strip().lower()
+
+    # Route dummy model without requiring an API key
+    if clean_model in {"claude-3-5-sonnet", "claude-3.5-sonnet"}:
+        return _generate_dummy_completion(
+            clean_model, body, response, x_team, x_feature, x_user, x_env
+        )
+
+    # ChatGPT (gpt-4o): Real-time API key usage
+    if clean_model not in {"gpt-4o", "gpt-4"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model}' is not in the active Model Registry. "
+                "Allowed models: 'gpt-4o' (ChatGPT, real-time), 'gemini-1.5-flash' (Gemini, real-time), "
+                "'claude-3-5-sonnet' (Claude, dummy data)."
+            ),
+        )
+
     api_key = _api_key("openai")
     if not api_key:
-        raise HTTPException(status_code=503, detail="Set OPENAI_API_KEY to enable OpenAI requests")
+        raise HTTPException(status_code=503, detail="Set OPENAI_API_KEY to enable real-time OpenAI/ChatGPT requests")
     started = perf_counter()
     result = _upstream_json(
         OPENAI_CHAT_URL,
@@ -321,16 +443,22 @@ def gemini_generate_content(
     x_env: str | None = Header(default="production"),
 ) -> JSONResponse:
     """Forward Gemini's native generateContent format and capture usageMetadata."""
-    model = model.strip()
-    if not model or len(model) > 200:
-        raise HTTPException(status_code=422, detail="A valid Gemini model identifier is required")
-    api_key = _api_key("gemini")
+    clean_model = model.strip().lower()
+    if clean_model != "gemini-1.5-flash":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model}' is not in the active Model Registry. "
+                "Allowed Gemini models: 'gemini-1.5-flash' (Gemini, real-time)."
+            ),
+        )
+    api_key = _api_key("google")
     if not api_key:
-        raise HTTPException(status_code=503, detail="Set GEMINI_API_KEY or GOOGLE_API_KEY to enable Gemini requests")
+        raise HTTPException(status_code=503, detail="Set GEMINI_API_KEY or GOOGLE_API_KEY to enable real-time Gemini requests")
     if "contents" not in body:
         raise HTTPException(status_code=422, detail="Gemini requests must include contents")
     started = perf_counter()
-    url = f"{GEMINI_API_ROOT}/{quote(model, safe='-_.')}:generateContent"
+    url = f"{GEMINI_API_ROOT}/{quote(clean_model, safe='-_.')}:generateContent"
     result = _upstream_json(
         url,
         headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
@@ -342,7 +470,7 @@ def gemini_generate_content(
         raise HTTPException(status_code=502, detail="Gemini response has no usageMetadata; no usage was recorded")
     finops = _record_usage(
         provider="google",
-        model=model,
+        model=clean_model,
         provider_host=GEMINI_HOST,
         provider_request_id=result.get("responseId"),
         usage=usage,
@@ -355,6 +483,46 @@ def gemini_generate_content(
     )
     result["finops_attribution"] = finops
     return JSONResponse(content=result, headers=dict(response.headers))
+
+
+@app.post("/v1/messages")
+def anthropic_messages(
+    body: dict[str, Any],
+    response: Response,
+    x_team: str | None = Header(default=None),
+    x_feature: str | None = Header(default=None),
+    x_user: str | None = Header(default=None),
+    x_env: str | None = Header(default="production"),
+) -> JSONResponse:
+    """Handle Anthropic Messages format for claude-3-5-sonnet with dummy data simulation."""
+    model = str(body.get("model", "claude-3-5-sonnet")).strip().lower()
+    if model not in {"claude-3-5-sonnet", "claude-3.5-sonnet"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{model}' is not in the active Model Registry. Allowed: 'claude-3-5-sonnet'."
+        )
+    return _generate_dummy_completion(
+        model, body, response, x_team, x_feature, x_user, x_env
+    )
+
+
+@app.post("/v1/simulate/dummy-request")
+def simulate_dummy_request(
+    team: str = Query(default="engineering"),
+    feature: str = Query(default="agent-chat"),
+    user_id: str = Query(default="sim_user_01"),
+    env: str = Query(default="production"),
+) -> dict[str, Any]:
+    """Trigger an immediate dummy request generation for claude-3-5-sonnet."""
+    dummy_body = {
+        "model": "claude-3-5-sonnet",
+        "messages": [{"role": "user", "content": "Simulated dummy test request."}],
+    }
+    dummy_resp = Response()
+    res = _generate_dummy_completion(
+        "claude-3-5-sonnet", dummy_body, dummy_resp, team, feature, user_id, env
+    )
+    return json.loads(res.body.decode("utf-8"))
 
 
 @app.get("/usage/summary")
@@ -376,6 +544,17 @@ def usage_requests(
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     return store.requests(provider=provider.lower() if provider else None, limit=limit, offset=offset)
+
+
+@app.post("/internal/central-sync")
+def sync_usage_to_central() -> dict[str, int]:
+    """Flush pending local DuckDB records to the configured central receiver."""
+    try:
+        return sync_usage_store(store)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":

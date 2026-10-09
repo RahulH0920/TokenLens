@@ -22,42 +22,6 @@ PRICING_DATA = [
         "effective_to": ""
     },
     {
-        "model": "gpt-4o-mini",
-        "provider": "openai",
-        "input_usd_per_1m": "0.15",
-        "output_usd_per_1m": "0.60",
-        "cached_usd_per_1m": "0.075",
-        "effective_from": "2026-01-01",
-        "effective_to": ""
-    },
-    {
-        "model": "claude-3-5-sonnet",
-        "provider": "anthropic",
-        "input_usd_per_1m": "3.00",
-        "output_usd_per_1m": "15.00",
-        "cached_usd_per_1m": "0.30",
-        "effective_from": "2026-01-01",
-        "effective_to": ""
-    },
-    {
-        "model": "claude-3-haiku",
-        "provider": "anthropic",
-        "input_usd_per_1m": "0.25",
-        "output_usd_per_1m": "1.25",
-        "cached_usd_per_1m": "0.03",
-        "effective_from": "2026-01-01",
-        "effective_to": ""
-    },
-    {
-        "model": "gemini-1.5-pro",
-        "provider": "google",
-        "input_usd_per_1m": "3.50",
-        "output_usd_per_1m": "10.50",
-        "cached_usd_per_1m": "0.875",
-        "effective_from": "2026-01-01",
-        "effective_to": ""
-    },
-    {
         "model": "gemini-1.5-flash",
         "provider": "google",
         "input_usd_per_1m": "0.075",
@@ -67,20 +31,11 @@ PRICING_DATA = [
         "effective_to": ""
     },
     {
-        "model": "llama-3.1-70b",
-        "provider": "meta",
-        "input_usd_per_1m": "0.80",
-        "output_usd_per_1m": "0.80",
-        "cached_usd_per_1m": "0.00",
-        "effective_from": "2026-01-01",
-        "effective_to": ""
-    },
-    {
-        "model": "text-embedding-3-small",
-        "provider": "openai",
-        "input_usd_per_1m": "0.02",
-        "output_usd_per_1m": "0.00",
-        "cached_usd_per_1m": "0.00",
+        "model": "claude-3-5-sonnet",
+        "provider": "anthropic",
+        "input_usd_per_1m": "3.00",
+        "output_usd_per_1m": "15.00",
+        "cached_usd_per_1m": "0.30",
         "effective_from": "2026-01-01",
         "effective_to": ""
     }
@@ -110,7 +65,7 @@ def generate():
         "research": ["agent-chat", "summarisation", "code-review"],
         "marketing": ["summarisation", "translation", "classification"]
     }
-    models = ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet", "claude-3-haiku", "gemini-1.5-pro", "gemini-1.5-flash", "llama-3.1-70b"]
+    models = ["gpt-4o", "gemini-1.5-flash", "claude-3-5-sonnet"]
     
     start_time = datetime(2026, 10, 1, 8, 0, 0)
     

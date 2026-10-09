@@ -42,9 +42,14 @@ class UsageStore:
                 cached_cost_usd DECIMAL(18, 6) NOT NULL,
                 total_cost_usd DECIMAL(18, 6) NOT NULL,
                 missing_price BOOLEAN NOT NULL,
-                is_unattributed BOOLEAN NOT NULL
+                is_unattributed BOOLEAN NOT NULL,
+                central_synced BOOLEAN NOT NULL DEFAULT FALSE
             )
             """
+        )
+        # Add the sync marker to existing local ledgers without replacing their data.
+        self.connection.execute(
+            "ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS central_synced BOOLEAN DEFAULT FALSE"
         )
 
     def count(self) -> int:
@@ -95,7 +100,13 @@ class UsageStore:
             try:
                 self.connection.executemany(
                     """
-                    INSERT INTO usage_events VALUES (
+                    INSERT INTO usage_events (
+                        request_id, provider, provider_host, provider_request_id,
+                        model, timestamp_utc, team, feature, user_id, env,
+                        input_tokens, output_tokens, cached_tokens, latency_ms,
+                        status, source, input_cost_usd, output_cost_usd,
+                        cached_cost_usd, total_cost_usd, missing_price, is_unattributed
+                    ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
@@ -218,3 +229,42 @@ class UsageStore:
                     item[key] = float(value)
             items.append(item)
         return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+    def pending_for_central(self, limit: int = 500) -> list[dict]:
+        """Read an ordered page of ledger rows not yet acknowledged by central."""
+        with self.lock:
+            cursor = self.connection.execute(
+                """
+                SELECT request_id, provider, provider_host, provider_request_id, model,
+                       CAST(timestamp_utc AS VARCHAR) AS timestamp_utc,
+                       team, feature, user_id, env, input_tokens, output_tokens,
+                       cached_tokens, latency_ms, status, source, input_cost_usd,
+                       output_cost_usd, cached_cost_usd, total_cost_usd,
+                       missing_price, is_unattributed
+                FROM usage_events
+                WHERE central_synced = FALSE
+                ORDER BY timestamp_utc, request_id
+                LIMIT ?
+                """,
+                [limit],
+            )
+            names = [item[0] for item in cursor.description]
+            rows = cursor.fetchall()
+        events = []
+        for row in rows:
+            event = dict(zip(names, row))
+            for key, value in event.items():
+                if key.endswith("_usd"):
+                    event[key] = str(value)
+            events.append(event)
+        return events
+
+    def mark_central_synced(self, request_ids: list[str]) -> None:
+        """Checkpoint only rows that the receiver has acknowledged."""
+        if not request_ids:
+            return
+        with self.lock:
+            self.connection.execute(
+                "UPDATE usage_events SET central_synced = TRUE WHERE request_id IN (SELECT UNNEST(?))",
+                [request_ids],
+            )

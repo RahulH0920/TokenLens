@@ -6,7 +6,7 @@
 - **Source Records Ingested:** 1,208
 - **Valid Processed Records:** 1,200
 - **Pricing Table Version:** `v2026.10`
-- **Audit Timestamp:** `2026-10-09T18:03:36Z`
+- **Audit Timestamp:** `2026-10-09T20:22:55Z`
 
 ## 2. Methodology & Guarantees
 - **Independent Recompute:** Expected values computed independently via separate test manifest, never sharing engine cache or view code.
@@ -20,28 +20,28 @@
 | Row Count Reconciliation (Source == Loaded + Rejected) | Ingestion Integrity | 1208 | 1208 | 0 | Exact (0) | ✅ PASS |
 | Duplicate Request IDs | Ingestion Integrity | 0 | 5 | 5 | 0 duplicate IDs allowed | ⚠️ WARNING |
 | Total Valid Requests | Dataset Totals | 1200 | 1200 | 0 | Exact (0) | ✅ PASS |
-| Total Input Tokens | Token Volume | 4,711,994 | 4,711,994 | 0 | Exact (0) | ✅ PASS |
-| Total Output Tokens | Token Volume | 1,006,027 | 1,006,027 | 0 | Exact (0) | ✅ PASS |
-| Total Spend ($ USD) | Financial Reconciliation | $14.3633 | $14.3634 | $+0.0001 | ±$0.01 (0.01%) | ✅ PASS |
-| Cross-Cut Invariant (Team Sum == Model Sum == Grand Total) | Financial Integrity | $14.3634 | Team: $14.3634 | Model: $14.3634 | $0.000000 | < $0.0001 | ✅ PASS |
-| Missing Pricing Exceptions Handled | Exception Auditing | 6 | 6 | 0 | Exact expected count | ✅ PASS |
-| Unattributed Spend Surfacing | Attribution Integrity | Surfaced & Audited | 92 requests ($1.00) | None dropped | 100% surfaced | ✅ PASS |
+| Total Input Tokens | Token Volume | 6,161,501 | 6,161,501 | 0 | Exact (0) | ✅ PASS |
+| Total Output Tokens | Token Volume | 1,269,818 | 1,269,818 | 0 | Exact (0) | ✅ PASS |
+| Total Spend ($ USD) | Financial Reconciliation | $28.3344 | $28.3345 | $+0.0001 | ±$0.01 (0.01%) | ✅ PASS |
+| Cross-Cut Invariant (Team Sum == Model Sum == Grand Total) | Financial Integrity | $28.3345 | Team: $28.3345 | Model: $28.3345 | $0.000000 | < $0.0001 | ✅ PASS |
+| Missing Pricing Exceptions Handled | Exception Auditing | 12 | 12 | 0 | Exact expected count | ✅ PASS |
+| Unattributed Spend Surfacing | Attribution Integrity | Surfaced & Audited | 89 requests ($1.86) | None dropped | 100% surfaced | ✅ PASS |
 
 ## 4. Spot-Check Audit (Independently Hand-Calculated Sample)
 The following random records were independently recalculated by hand and verified against the cost engine output:
 
 | Request ID | Model | In Tokens | Out Tokens | Rate (In/Out per 1M) | Expected Cost ($) | Engine Cost ($) | Status |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `req_0833` | `claude-3-5-sonnet` | 3,390 | 1,387 | $3.00 / $15.00 | $0.030975 | $0.030975 | ✅ MATCH |
-| `req_0785` | `gemini-1.5-flash` | 1,728 | 439 | $0.07 / $0.30 | $0.000261 | $0.000262 | ✅ MATCH |
-| `req_0412` | `llama-3.1-70b` | 6,550 | 1,688 | $0.80 / $0.80 | $0.006590 | $0.006590 | ✅ MATCH |
-| `req_0369` | `claude-3-5-sonnet` | 10,167 | 566 | $3.00 / $15.00 | $0.038991 | $0.038991 | ✅ MATCH |
-| `req_0474` | `claude-3-haiku` | 1,720 | 530 | $0.25 / $1.25 | $0.001093 | $0.001093 | ✅ MATCH |
-| `req_0511` | `claude-3-haiku` | 1,126 | 608 | $0.25 / $1.25 | $0.001042 | $0.001042 | ✅ MATCH |
-| `req_0274` | `gpt-4o-mini` | 1,165 | 122 | $0.15 / $0.60 | $0.000248 | $0.000248 | ✅ MATCH |
-| `req_0178` | `gemini-1.5-pro` | 1,658 | 493 | $3.50 / $10.50 | $0.010980 | $0.010980 | ✅ MATCH |
-| `req_0517` | `claude-3-5-sonnet` | 9,104 | 2,388 | $3.00 / $15.00 | $0.063132 | $0.063132 | ✅ MATCH |
-| `req_0790` | `gpt-4o-mini` | 3,098 | 304 | $0.15 / $0.60 | $0.000711 | $0.000711 | ✅ MATCH |
+| `req_0836` | `gemini-1.5-flash` | 1,534 | 124 | $0.07 / $0.30 | $0.000165 | $0.000165 | ✅ MATCH |
+| `req_0788` | `claude-3-5-sonnet` | 4,650 | 752 | $3.00 / $15.00 | $0.025230 | $0.025230 | ✅ MATCH |
+| `req_0414` | `claude-3-5-sonnet` | 10,907 | 2,393 | $3.00 / $15.00 | $0.070081 | $0.070081 | ✅ MATCH |
+| `req_0371` | `claude-3-5-sonnet` | 10,089 | 1,408 | $3.00 / $15.00 | $0.052041 | $0.052041 | ✅ MATCH |
+| `req_0478` | `claude-3-5-sonnet` | 6,432 | 1,511 | $3.00 / $15.00 | $0.041961 | $0.041961 | ✅ MATCH |
+| `req_0515` | `claude-3-5-sonnet` | 11,216 | 1,741 | $3.00 / $15.00 | $0.059763 | $0.059763 | ✅ MATCH |
+| `req_0274` | `gemini-1.5-flash` | 2,169 | 378 | $0.07 / $0.30 | $0.000276 | $0.000276 | ✅ MATCH |
+| `req_0179` | `gpt-4o` | 7,737 | 1,094 | $2.50 / $10.00 | $0.031824 | $0.031824 | ✅ MATCH |
+| `req_0521` | `gemini-1.5-flash` | 3,049 | 479 | $0.07 / $0.30 | $0.000394 | $0.000394 | ✅ MATCH |
+| `req_0793` | `claude-3-5-sonnet` | 6,900 | 655 | $3.00 / $15.00 | $0.030614 | $0.030614 | ✅ MATCH |
 
 ## 5. Audit Conclusion
 All 8 primary integrity and financial checks **PASSED**.

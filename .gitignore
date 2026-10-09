@@ -18,6 +18,8 @@ venv.bak/
 # Environment and Secrets
 *.env
 *.env.*
+central.env
+!central.env.example
 *.secret
 *.pem
 *.key

@@ -1254,10 +1254,21 @@ elif active_view == "Settings":
         st.markdown("### 1. Model Pricing Registry")
         st.caption("Active model rate card used for deterministic cost calculations across all workloads.")
 
+        def _get_model_mode(model_name: str) -> str:
+            m = model_name.lower()
+            if "gpt-4o" in m:
+                return "🟢 Real-Time API Key (OpenAI)"
+            elif "gemini" in m:
+                return "🟢 Real-Time API Key (Google)"
+            elif "claude" in m:
+                return "🟣 Dummy Data (Synthetic)"
+            return "Custom"
+
         pricing_df_disp = pd.DataFrame([
             {
                 "Model": p.model,
                 "Provider": p.provider.upper(),
+                "Mode / Data Source": _get_model_mode(p.model),
                 "Input ($/1M)": f"${float(p.input_usd_per_1m):.2f}",
                 "Output ($/1M)": f"${float(p.output_usd_per_1m):.2f}",
                 "Cached ($/1M)": f"${float(p.cached_usd_per_1m):.3f}",
@@ -1266,6 +1277,86 @@ elif active_view == "Settings":
             for p in pricing_records
         ])
         st.dataframe(pricing_df_disp, use_container_width=True, hide_index=True)
+
+        # Provider Credentials & Dummy Simulation Panel
+        st.markdown("<div style='margin-top: 1.2rem;'></div>", unsafe_allow_html=True)
+        st.markdown("#### Provider API Usage & Simulation Status")
+        st.caption("ChatGPT and Gemini receive live requests using configured API keys; Claude operates on simulated dummy data.")
+
+        prov_c1, prov_c2 = st.columns(2)
+        with prov_c1:
+            st.markdown("""
+            <div style="background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 9px; padding: 12px 16px; margin-bottom: 12px;">
+                <div style="font-weight: 600; font-size: 0.90rem; color: #111827; margin-bottom: 4px;">🟢 Real-Time API Key Usage</div>
+                <div style="font-size: 0.80rem; color: #6B7280;">Live token tracking via provider API credentials.</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            openai_key = os.getenv("OPENAI_API_KEY", "")
+            has_openai = bool(openai_key.strip())
+            st.markdown(f"**ChatGPT (`gpt-4o`):** {'🟢 Active (`sk-...' + openai_key[-4:] + '`)' if has_openai else '⚠️ `OPENAI_API_KEY` not set'}")
+            new_openai = st.text_input("Set OpenAI API Key", value="" if not has_openai else "••••••••", type="password", key="input_openai_key", help="Required for live ChatGPT usage capture")
+            if new_openai and new_openai != "••••••••":
+                if st.button("Save OpenAI Key", key="btn_save_openai"):
+                    os.environ["OPENAI_API_KEY"] = new_openai.strip()
+                    st.success("Saved OPENAI_API_KEY to environment.")
+                    st.rerun()
+
+            gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+            has_gemini = bool(gemini_key.strip())
+            st.markdown(f"**Gemini (`gemini-1.5-flash`):** {'🟢 Active (`AIza...' + gemini_key[-4:] + '`)' if has_gemini else '⚠️ `GEMINI_API_KEY` not set'}")
+            new_gemini = st.text_input("Set Gemini API Key", value="" if not has_gemini else "••••••••", type="password", key="input_gemini_key", help="Required for live Gemini usage capture")
+            if new_gemini and new_gemini != "••••••••":
+                if st.button("Save Gemini Key", key="btn_save_gemini"):
+                    os.environ["GEMINI_API_KEY"] = new_gemini.strip()
+                    st.success("Saved GEMINI_API_KEY to environment.")
+                    st.rerun()
+
+        with prov_c2:
+            st.markdown("""
+            <div style="background: #FDF4FF; border: 1px solid #F5D0FE; border-radius: 9px; padding: 12px 16px; margin-bottom: 12px;">
+                <div style="font-weight: 600; font-size: 0.90rem; color: #86198F; margin-bottom: 4px;">🟣 Dummy Data AI Model</div>
+                <div style="font-size: 0.80rem; color: #A21CAF;">Zero-cost synthetic simulation for telemetry and load testing.</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("**Claude (`claude-3-5-sonnet`):** 🟣 Active (Dummy Data Mode)")
+            st.caption("No API key required. Generates realistic token counts and deterministic cost telemetry.")
+
+            sim_team = st.selectbox("Attribution Team for Dummy Request", ["engineering", "support", "product", "marketing"], key="sim_team_sel")
+            sim_feat = st.selectbox("Attribution Feature", ["agent-chat", "code-review", "doc-search", "summarisation"], key="sim_feat_sel")
+
+            if st.button("🧪 Inject Simulated Claude Request", use_container_width=True, key="btn_inject_dummy_req"):
+                import random
+                from uuid import uuid4
+                now_utc = datetime.now(timezone.utc)
+                in_tok = random.randint(1500, 6000)
+                out_tok = random.randint(250, 1200)
+                cached_tok = int(in_tok * 0.25) if random.random() < 0.4 else 0
+                dummy_req = RequestRecord(
+                    request_id=f"req_sim_{uuid4().hex[:8]}",
+                    timestamp_utc=now_utc,
+                    team=sim_team,
+                    feature=sim_feat,
+                    user_id=f"sim_user_{random.randint(10, 99)}",
+                    model="claude-3-5-sonnet",
+                    provider="anthropic",
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    cached_tokens=cached_tok,
+                    status="success",
+                    latency_ms=random.randint(280, 850),
+                    env="production",
+                    source="dummy_simulation"
+                )
+                engine = CostEngine()
+                engine.load_pricing_records(st.session_state.pricing_records)
+                priced_dummy = engine.calculate_request_cost(dummy_req)
+
+                st.session_state.priced_list.append(priced_dummy)
+                st.session_state.df = engine.get_priced_dataframe(st.session_state.priced_list)
+                st.success(f"Generated synthetic request `{dummy_req.request_id}` for claude-3-5-sonnet! Cost: ${priced_dummy.total_cost_usd:.6f}")
+                st.rerun()
 
         # Interactive New Model Adding Option
         with st.expander("➕ Add New Model to Rate Card", expanded=False):
