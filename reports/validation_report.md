@@ -9,7 +9,7 @@
 - **Dataset SHA-256 Prefix:** `bcab906d6394841b`
 - **Pricing Table Version:** `v2026.10`
 - **Pricing File SHA-256 Prefix:** `c877a39e0674125a`
-- **Audit Timestamp (UTC):** `2026-10-09T23:37:34Z`
+- **Audit Timestamp (UTC):** `2026-10-10T03:22:21Z`
 
 ## 2. Validation Results Matrix (Expected vs Actual Dashboard Totals)
 All financial comparisons use unrounded Decimal amounts. Display values are rounded to six decimal places.

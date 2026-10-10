@@ -39,6 +39,7 @@ from core.reconciliation import ReconciliationEngine
 from core.validation_report import load_validation_report
 from core.guardrails import GuardrailEngine
 from core.database import DuckDBAnalytics
+from core.token_simulator import TokenUsageSimulator, SimulationConfig, SimulationSummary
 from core.access_control import (
     AccessControlStore,
     ROLE_LABELS,
@@ -766,6 +767,7 @@ all_nav_options = [
     "Spend Detective",
     "Savings Lab",
     "Trend",
+    "Token Usage Simulator",
     "Task Manager",
     "Request Logs",
     "Settings"
@@ -775,6 +777,7 @@ nav_options = all_nav_options if is_org_head else [
     "Spend Detective",
     "Savings Lab",
     "Trend",
+    "Token Usage Simulator",
     "Task Manager",
     "Request Logs",
 ]
@@ -1599,12 +1602,571 @@ elif active_view == "Trend":
         st.plotly_chart(fig_feat, use_container_width=True)
 
 
+# =========================================================================
+# TOKEN USAGE SIMULATOR (SYNTHETIC LLM WORKLOAD GENERATOR & LIVE TELEMETRY)
+# =========================================================================
+elif active_view == "Token Usage Simulator":
+    st.markdown("""
+    <div style="margin-bottom: 1.4rem; padding-bottom: 0.8rem; border-bottom: 1px solid #E5E7EB;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <h1 style="font-size: 1.75rem; margin-bottom: 4px;">Token Usage Simulator</h1>
+                <p style="color: #6B7280; font-size: 0.92rem; margin: 0;">
+                    Interactive multi-provider LLM token generator with real-time financial modeling, prompt caching analysis, and traffic pattern simulations.
+                </p>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                <span class="badge-warn" style="font-size: 0.78rem;">🔬 Interactive FinOps Lab</span>
+                <span style="background-color: #ECFDF5; color: #059669; border: 1px solid #A7F3D0; padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: 600;">🛡️ 100% Isolated Data</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
+    # Instantiate Simulator using authoritative pricing registry
+    sim_cost_engine = CostEngine()
+    sim_cost_engine.load_pricing_records(pricing_records)
+    simulator = TokenUsageSimulator(sim_cost_engine)
+
+    # 1. Simulator Configuration Form
+    with st.expander("⚙️ Simulator Configuration & Workload Parameters", expanded=True):
+        cfg_col1, cfg_col2 = st.columns(2, gap="large")
+
+        with cfg_col1:
+            st.markdown("<div style='font-size: 0.88rem; font-weight: 600; color: #111827; margin-bottom: 6px;'>Provider & Workload Profile</div>", unsafe_allow_html=True)
+
+            sim_provider = st.selectbox(
+                "AI Provider",
+                options=["all", "openai", "anthropic", "google"],
+                index=0,
+                help="Select a specific provider or 'all' to distribute workload across multi-provider endpoints.",
+                key="sim_provider_select"
+            )
+
+            provider_models_map = {
+                "all": ["gpt-4o", "claude-3-5-sonnet", "gemini-1.5-flash"],
+                "openai": ["gpt-4o"],
+                "anthropic": ["claude-3-5-sonnet"],
+                "google": ["gemini-1.5-flash"],
+            }
+            available_sim_models = provider_models_map.get(sim_provider, ["gpt-4o"])
+
+            sim_models = st.multiselect(
+                "Models to Simulate",
+                options=available_sim_models,
+                default=available_sim_models,
+                help="Models included in the generated synthetic traffic.",
+                key="sim_models_select"
+            )
+            if not sim_models:
+                sim_models = available_sim_models[:1]
+
+            sim_traffic = st.selectbox(
+                "Traffic Pattern",
+                options=["variable", "burst", "steady"],
+                index=0,
+                format_func=lambda x: {
+                    "variable": "Variable Traffic (diurnal business-hour peaks)",
+                    "burst": "Burst Traffic (steady baseline + sharp spike clusters)",
+                    "steady": "Steady Traffic (uniform constant arrival rate)"
+                }.get(x, x),
+                help="Simulates different real-world consumption patterns.",
+                key="sim_traffic_select"
+            )
+
+            duration_map = {
+                "1 Hour": 1,
+                "6 Hours": 6,
+                "12 Hours": 12,
+                "24 Hours": 24,
+                "7 Days": 168
+            }
+            sim_duration_str = st.selectbox(
+                "Simulation Time Window",
+                options=list(duration_map.keys()),
+                index=3,
+                key="sim_duration_select"
+            )
+            sim_duration_hours = duration_map[sim_duration_str]
+
+            team_choices = ["all", "engineering", "product", "growth-marketing", "customer-support"]
+            sim_team = st.selectbox("Attributed Department", team_choices, index=0, key="sim_team_select")
+
+            feature_choices = ["all", "agent-chat", "code-review", "doc-search", "summarisation"]
+            sim_feature = st.selectbox("Workload Feature", feature_choices, index=0, key="sim_feature_select")
+
+        with cfg_col2:
+            st.markdown("<div style='font-size: 0.88rem; font-weight: 600; color: #111827; margin-bottom: 6px;'>Token Ranges & Cache Optimization</div>", unsafe_allow_html=True)
+
+            sim_requests_count = st.slider(
+                "Simulated Request Volume",
+                min_value=10,
+                max_value=300,
+                value=75,
+                step=5,
+                help="Total synthetic requests to generate across the selected timeline.",
+                key="sim_requests_slider"
+            )
+
+            in_range = st.slider(
+                "Input Tokens Range (per request)",
+                min_value=100,
+                max_value=6000,
+                value=(600, 2400),
+                step=50,
+                help="Min and max input prompt tokens per simulated request.",
+                key="sim_in_slider"
+            )
+
+            out_range = st.slider(
+                "Output Tokens Range (per request)",
+                min_value=50,
+                max_value=2000,
+                value=(120, 600),
+                step=25,
+                help="Min and max completion tokens generated per request.",
+                key="sim_out_slider"
+            )
+
+            enable_cache = st.checkbox(
+                "Enable Prompt Caching Simulation",
+                value=True,
+                help="Models supporting prompt caching (e.g. gpt-4o, claude-3-5-sonnet, gemini-1.5-flash) will receive discounted cached token pricing.",
+                key="sim_cache_enable"
+            )
+
+            cache_ratio = st.slider(
+                "Expected Cache Hit Ratio",
+                min_value=0.05,
+                max_value=0.90,
+                value=0.40,
+                step=0.05,
+                format="%.0f%%",
+                disabled=not enable_cache,
+                help="Average proportion of input prompt tokens served from cache.",
+                key="sim_cache_ratio"
+            ) if enable_cache else 0.0
+
+            sim_seed = st.number_input(
+                "Deterministic Seed",
+                min_value=1,
+                max_value=999999,
+                value=int(st.session_state.get("sim_custom_seed", 42)),
+                step=1,
+                help="Same seed guarantees 100% reproducible token counts and costs.",
+                key="sim_seed_input"
+            )
+
+        st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 0.8rem 0 1rem;'>", unsafe_allow_html=True)
+
+        btn_c1, btn_c2, btn_c3, _ = st.columns([1.5, 1.8, 1.5, 4])
+        with btn_c1:
+            run_btn = st.button("🚀 Run Simulation", type="primary", use_container_width=True, key="run_sim_btn")
+        with btn_c2:
+            rand_btn = st.button("🎲 New Seed & Run", use_container_width=True, key="rand_sim_btn")
+        with btn_c3:
+            reset_btn = st.button("🔄 Reset Simulation", use_container_width=True, key="reset_sim_btn")
+
+    has_explicitly_reset = st.session_state.get("sim_is_reset", False)
+    should_run = False
+
+    if reset_btn:
+        st.session_state["sim_is_reset"] = True
+        st.session_state.pop("sim_active_result", None)
+        st.session_state.pop("sim_custom_seed", None)
+        st.rerun()
+
+    if rand_btn:
+        new_seed = random.randint(100, 99999)
+        st.session_state["sim_custom_seed"] = new_seed
+        st.session_state["sim_is_reset"] = False
+        sim_seed = new_seed
+        should_run = True
+
+    if run_btn:
+        st.session_state["sim_is_reset"] = False
+        should_run = True
+
+    # Auto-run default simulation on first visit
+    if "sim_active_result" not in st.session_state and not has_explicitly_reset:
+        should_run = True
+
+    # Generate simulation if triggered
+    if should_run:
+        active_config = SimulationConfig(
+            provider=sim_provider,
+            models=sim_models,
+            num_requests=sim_requests_count,
+            input_tokens_min=in_range[0],
+            input_tokens_max=in_range[1],
+            output_tokens_min=out_range[0],
+            output_tokens_max=out_range[1],
+            enable_cached_tokens=enable_cache,
+            cached_token_ratio=cache_ratio,
+            duration_hours=sim_duration_hours,
+            traffic_pattern=sim_traffic,
+            team=sim_team if sim_team != "all" else None,
+            feature=sim_feature if sim_feature != "all" else None,
+            seed=int(sim_seed),
+        )
+        sim_raw, sim_priced, sim_df, sim_summary = simulator.generate(active_config)
+        st.session_state["sim_active_result"] = {
+            "raw": sim_raw,
+            "priced": sim_priced,
+            "df": sim_df,
+            "summary": sim_summary,
+            "config": active_config,
+        }
+
+    if "sim_active_result" not in st.session_state:
+        st.info("💡 **Ready to Simulate:** Adjust the parameters above and click **'🚀 Run Simulation'** to generate synthetic token usage and observe live dashboard charts.")
+    else:
+        active_sim = st.session_state["sim_active_result"]
+        sim_df = active_sim["df"]
+        sim_summary = active_sim["summary"]
+        sim_cfg = active_sim["config"]
+
+        # 2. Prominent SIMULATED DATA Indicator Banner
+        st.markdown("""
+        <div style="background: #FEF3C7; border: 1px solid #F59E0B; border-radius: 9px; padding: 12px 18px; margin: 1.2rem 0; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 1px 3px rgba(245, 158, 11, 0.08);">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span style="font-size: 1.2rem;">⚠️</span>
+                <div>
+                    <strong style="color: #92400E; font-size: 0.92rem;">SIMULATED DATA ACTIVE</strong>
+                    <p style="color: #B45309; font-size: 0.82rem; margin: 2px 0 0 0;">
+                    All charts and telemetry below reflect synthetic tokens priced using the Decimal-safe CostEngine. Real production data remains completely isolated and untouched.
+                </p>
+            </div>
+        </div>
+        <span style="background: #F59E0B; color: #FFFFFF; font-weight: 700; font-size: 0.72rem; padding: 4px 10px; border-radius: 5px; letter-spacing: 0.05em;">SYNTHETIC RUN</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 3. KPI Summary Strip
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    with kpi1:
+        st.markdown(f"""
+        <div class="saas-card">
+            <div class="saas-kpi-label">Simulated Requests</div>
+            <div class="saas-kpi-value">{sim_summary.total_requests:,}</div>
+            <div class="saas-kpi-sub">Pattern: <b>{sim_summary.traffic_pattern.capitalize()}</b> · Seed: {sim_summary.seed_used}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with kpi2:
+        st.markdown(f"""
+        <div class="saas-card">
+            <div class="saas-kpi-label">Estimated Total Spend</div>
+            <div class="saas-kpi-value">${float(sim_summary.total_spend_usd):,.2f}</div>
+            <div class="saas-kpi-sub">Avg <b>${float(sim_summary.avg_cost_per_request):.4f}</b> / request</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with kpi3:
+        st.markdown(f"""
+        <div class="saas-card">
+            <div class="saas-kpi-label">Total Token Volume</div>
+            <div class="saas-kpi-value">{sim_summary.total_tokens / 1e6:,.2f}M</div>
+            <div class="saas-kpi-sub">In: {sim_summary.total_input_tokens / 1e6:.2f}M · Out: {sim_summary.total_output_tokens / 1e6:.2f}M</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with kpi4:
+        st.markdown(f"""
+        <div class="saas-card">
+            <div class="saas-kpi-label">Prompt Cache Savings</div>
+            <div class="saas-kpi-value" style="color: #059669;">${float(sim_summary.cached_savings_usd):,.2f}</div>
+            <div class="saas-kpi-sub">{sim_summary.total_cached_tokens / 1e6:,.2f}M cached tokens ({(sim_summary.total_cached_tokens / sim_summary.total_input_tokens * 100 if sim_summary.total_input_tokens else 0):.1f}%)</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 4. CHART A: Token Usage Over Time
+    st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.4rem 0 1rem;'>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="margin-bottom: 0.6rem;">
+        <span style="font-size: 1.05rem; font-weight: 600; color: #111827;">A. Token Usage Over Time</span>
+        <p style="color: #6B7280; font-size: 0.80rem; margin: 2px 0 0 0;">Time-series trajectory of Input Tokens, Output Tokens, and Cached Tokens across the simulation period.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Dynamic time-bucket aggregation based on duration
+    if sim_cfg.duration_hours <= 2:
+        freq = "2min"
+    elif sim_cfg.duration_hours <= 12:
+        freq = "15min"
+    elif sim_cfg.duration_hours <= 24:
+        freq = "30min"
+    else:
+        freq = "6h"
+
+    sim_df["timestamp_utc"] = pd.to_datetime(sim_df["timestamp_utc"])
+    time_agg = sim_df.groupby(pd.Grouper(key="timestamp_utc", freq=freq)).agg(
+        input_tokens=("input_tokens", "sum"),
+        output_tokens=("output_tokens", "sum"),
+        cached_tokens=("cached_tokens", "sum"),
+        request_count=("request_id", "count"),
+        total_cost_usd=("total_cost_usd", "sum"),
+    ).reset_index()
+
+    fig_time_tokens = go.Figure()
+    fig_time_tokens.add_trace(go.Scatter(
+        x=time_agg["timestamp_utc"],
+        y=time_agg["input_tokens"],
+        mode="lines+markers",
+        name="Input Tokens",
+        line=dict(color="#4F46E5", width=2.5),
+        marker=dict(size=4),
+        hovertemplate="<b>Input Tokens</b>: %{y:,.0f}<extra></extra>"
+    ))
+    fig_time_tokens.add_trace(go.Scatter(
+        x=time_agg["timestamp_utc"],
+        y=time_agg["output_tokens"],
+        mode="lines+markers",
+        name="Output Tokens",
+        line=dict(color="#10B981", width=2.5),
+        marker=dict(size=4),
+        hovertemplate="<b>Output Tokens</b>: %{y:,.0f}<extra></extra>"
+    ))
+    if sim_cfg.enable_cached_tokens:
+        fig_time_tokens.add_trace(go.Scatter(
+            x=time_agg["timestamp_utc"],
+            y=time_agg["cached_tokens"],
+            mode="lines+markers",
+            name="Cached Tokens",
+            line=dict(color="#F59E0B", width=2, dash="dash"),
+            marker=dict(size=4),
+            hovertemplate="<b>Cached Tokens</b>: %{y:,.0f}<extra></extra>"
+        ))
+    fig_time_tokens.update_layout(PLOT_LAYOUT)
+    fig_time_tokens.update_layout(
+        height=320,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        xaxis_title="Simulation Timeline (UTC)",
+        yaxis_title="Token Count"
+    )
+    st.plotly_chart(fig_time_tokens, use_container_width=True)
+
+    # 5. CHARTS B & C: Model-wise Token Distribution & Cost Comparison
+    grid_c1, grid_c2 = st.columns(2, gap="medium")
+
+    with grid_c1:
+        st.markdown("<div style='font-size: 1.05rem; font-weight: 600; color: #111827; margin-bottom: 2px;'>B. Model-wise Token Distribution</div>", unsafe_allow_html=True)
+        st.caption("Comparison of total tokens consumed across simulated foundational models.")
+
+        model_token_df = sim_df.groupby("model").agg(
+            input_tokens=("input_tokens", "sum"),
+            output_tokens=("output_tokens", "sum"),
+            cached_tokens=("cached_tokens", "sum"),
+            total_tokens=("total_tokens", "sum")
+        ).reset_index().sort_values(by="total_tokens", ascending=False)
+
+        fig_model_tokens = px.bar(
+            model_token_df,
+            x="model",
+            y=["input_tokens", "output_tokens"],
+            labels={"value": "Tokens", "model": "Model", "variable": "Type"},
+            color_discrete_map={"input_tokens": "#4F46E5", "output_tokens": "#10B981"},
+            barmode="stack"
+        )
+        fig_model_tokens.update_layout(PLOT_LAYOUT)
+        fig_model_tokens.update_layout(
+            height=280,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            xaxis_title="Model Architecture",
+            yaxis_title="Tokens"
+        )
+        st.plotly_chart(fig_model_tokens, use_container_width=True)
+
+    with grid_c2:
+        st.markdown("<div style='font-size: 1.05rem; font-weight: 600; color: #111827; margin-bottom: 2px;'>C. Model-wise Cost Comparison</div>", unsafe_allow_html=True)
+        st.caption("Estimated monetary expenditure by model calculated via rate card.")
+
+        model_cost_df = sim_df.groupby("model")["total_cost_usd"].sum().reset_index().sort_values(by="total_cost_usd", ascending=False)
+        fig_model_cost = px.bar(
+            model_cost_df,
+            x="model",
+            y="total_cost_usd",
+            text=model_cost_df["total_cost_usd"].apply(lambda v: f"${v:,.2f}"),
+            color="model",
+            color_discrete_sequence=["#4F46E5", "#06B6D4", "#8B5CF6", "#10B981"]
+        )
+        fig_model_cost.update_traces(
+            textposition="outside",
+            textfont=dict(color="#4B5563", size=11),
+            cliponaxis=False
+        )
+        fig_model_cost.update_layout(PLOT_LAYOUT)
+        fig_model_cost.update_layout(
+            height=280,
+            showlegend=False,
+            xaxis_title="Model Architecture",
+            yaxis_title="Estimated Spend ($ USD)"
+        )
+        st.plotly_chart(fig_model_cost, use_container_width=True)
+
+    # 6. CHARTS D & E: Input vs Output Proportion & Request Volume (Traffic Bursts)
+    grid_d1, grid_d2 = st.columns(2, gap="medium")
+
+    with grid_d1:
+        st.markdown("<div style='font-size: 1.05rem; font-weight: 600; color: #111827; margin-bottom: 2px;'>D. Input vs Output Token Proportions</div>", unsafe_allow_html=True)
+        st.caption("Proportional breakdown of prompt tokens (uncached & cached) vs generated output.")
+
+        uncached_in = max(0, sim_summary.total_input_tokens - sim_summary.total_cached_tokens)
+        io_pie_df = pd.DataFrame([
+            {"category": "Uncached Input", "tokens": uncached_in},
+            {"category": "Cached Input", "tokens": sim_summary.total_cached_tokens},
+            {"category": "Output Tokens", "tokens": sim_summary.total_output_tokens},
+        ])
+        io_pie_df = io_pie_df[io_pie_df["tokens"] > 0]
+
+        fig_io_donut = px.pie(
+            io_pie_df,
+            names="category",
+            values="tokens",
+            hole=0.55,
+            color="category",
+            color_discrete_map={
+                "Uncached Input": "#4F46E5",
+                "Cached Input": "#F59E0B",
+                "Output Tokens": "#10B981"
+            }
+        )
+        fig_io_donut.update_traces(
+            textposition="inside",
+            textinfo="percent",
+            hovertemplate="<b>%{label}</b><br>Tokens: %{value:,.0f}<br>Share: %{percent}<extra></extra>",
+            marker=dict(line=dict(color="#FFFFFF", width=2))
+        )
+        fig_io_donut.update_layout(PLOT_LAYOUT)
+        fig_io_donut.update_layout(
+            height=280,
+            margin=dict(l=10, r=10, t=10, b=25),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
+        )
+        st.plotly_chart(fig_io_donut, use_container_width=True)
+
+    with grid_d2:
+        st.markdown("<div style='font-size: 1.05rem; font-weight: 600; color: #111827; margin-bottom: 2px;'>E. Request Volume & Traffic Dynamics</div>", unsafe_allow_html=True)
+        st.caption(f"Request arrival frequency illustrating the active '{sim_summary.traffic_pattern.capitalize()}' traffic pattern.")
+
+        fig_req_vol = px.area(
+            time_agg,
+            x="timestamp_utc",
+            y="request_count",
+            labels={"timestamp_utc": "Timestamp", "request_count": "Requests"},
+            color_discrete_sequence=["#6366F1"]
+        )
+        fig_req_vol.update_traces(
+            line=dict(width=2),
+            hovertemplate="<b>Interval Requests</b>: %{y}<br>Time: %{x}<extra></extra>"
+        )
+        fig_req_vol.update_layout(PLOT_LAYOUT)
+        fig_req_vol.update_layout(
+            height=280,
+            xaxis_title="Timeline (UTC)",
+            yaxis_title="Request Volume"
+        )
+        st.plotly_chart(fig_req_vol, use_container_width=True)
+
+    # 7. CHART F: Cached-Token Financial Impact & Optimization ROI
+    st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.4rem 0 1rem;'>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="margin-bottom: 0.6rem;">
+        <span style="font-size: 1.05rem; font-weight: 600; color: #111827;">F. Cached-Token Economic Impact & Savings Analysis</span>
+        <p style="color: #6B7280; font-size: 0.80rem; margin: 2px 0 0 0;">Evaluates cost reduction achieved by utilizing prompt caching vs standard uncached token billing.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if sim_cfg.enable_cached_tokens and sim_summary.total_cached_tokens > 0:
+        cache_c1, cache_c2 = st.columns([1.2, 1], gap="medium")
+        with cache_c1:
+            uncached_hypothetical_spend = float(sim_summary.total_spend_usd + sim_summary.cached_savings_usd)
+            actual_sim_spend = float(sim_summary.total_spend_usd)
+            savings_pct = (float(sim_summary.cached_savings_usd) / uncached_hypothetical_spend * 100) if uncached_hypothetical_spend > 0 else 0.0
+
+            cache_comparison_df = pd.DataFrame([
+                {"Scenario": "Standard Uncached Rate", "Spend ($ USD)": uncached_hypothetical_spend, "Type": "Baseline"},
+                {"Scenario": "With Prompt Caching Active", "Spend ($ USD)": actual_sim_spend, "Type": "Optimized"}
+            ])
+            fig_cache_comp = px.bar(
+                cache_comparison_df,
+                x="Scenario",
+                y="Spend ($ USD)",
+                text=cache_comparison_df["Spend ($ USD)"].apply(lambda v: f"${v:,.2f}"),
+                color="Type",
+                color_discrete_map={"Baseline": "#9CA3AF", "Optimized": "#059669"}
+            )
+            fig_cache_comp.update_traces(
+                textposition="outside",
+                textfont=dict(size=12, color="#111827"),
+                cliponaxis=False
+            )
+            fig_cache_comp.update_layout(PLOT_LAYOUT)
+            fig_cache_comp.update_layout(height=260, showlegend=False, yaxis_title="Spend ($ USD)")
+            st.plotly_chart(fig_cache_comp, use_container_width=True)
+
+        with cache_c2:
+            st.markdown(f"""
+            <div class="saas-card" style="border-left: 4px solid #059669;">
+                <div style="font-weight: 600; color: #059669; font-size: 0.95rem; margin-bottom: 8px;">💰 Prompt Caching ROI Summary</div>
+                <div style="font-size: 0.85rem; color: #374151; line-height: 1.5;">
+                    By serving <b>{sim_summary.total_cached_tokens:,}</b> tokens from provider cache memory:
+                </div>
+                <div style="margin: 12px 0; background: #ECFDF5; border-radius: 8px; padding: 12px; border: 1px solid #A7F3D0;">
+                    <div style="font-size: 0.75rem; text-transform: uppercase; color: #065F46; font-weight: 700;">Net Financial Savings</div>
+                    <div style="font-size: 1.6rem; font-weight: 700; color: #065F46;">${float(sim_summary.cached_savings_usd):,.4f}</div>
+                    <div style="font-size: 0.78rem; color: #047857; margin-top: 2px;">{savings_pct:.1f}% reduction on total workload cost</div>
+                </div>
+                <div style="font-size: 0.78rem; color: #6B7280;">
+                    Formula: <code>(T_cached × (P_input - P_cached)) / 1,000,000</code> using verified rate cards.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("Prompt caching is currently disabled for this simulation run. Enable 'Prompt Caching Simulation' in parameters above to evaluate cache savings.")
+
+    # 8. Simulated Request Ledger Drill-Down Table
+    with st.expander("📋 Inspect Simulated Request Records & Ledger", expanded=False):
+        st.caption("Drill down into individual synthetic request records generated during this run.")
+        display_sim_df = sim_df[[
+            "request_id", "timestamp_utc", "provider", "model", "team", "feature",
+            "input_tokens", "output_tokens", "cached_tokens", "total_tokens", "total_cost_usd", "latency_ms"
+        ]].copy()
+
+        st.dataframe(
+            display_sim_df.sort_values(by="timestamp_utc", ascending=False),
+            use_container_width=True,
+            height=320,
+            column_config={
+                "request_id": st.column_config.TextColumn("Request ID"),
+                "timestamp_utc": st.column_config.DatetimeColumn("Timestamp (UTC)", format="YYYY-MM-DD HH:mm:ss"),
+                "provider": st.column_config.TextColumn("Provider"),
+                "model": st.column_config.TextColumn("Model"),
+                "team": st.column_config.TextColumn("Team"),
+                "feature": st.column_config.TextColumn("Feature"),
+                "input_tokens": st.column_config.NumberColumn("Input", format="%d"),
+                "output_tokens": st.column_config.NumberColumn("Output", format="%d"),
+                "cached_tokens": st.column_config.NumberColumn("Cached", format="%d"),
+                "total_tokens": st.column_config.NumberColumn("Total", format="%d"),
+                "total_cost_usd": st.column_config.NumberColumn("Spend", format="$%.6f"),
+                "latency_ms": st.column_config.NumberColumn("Latency", format="%d ms"),
+            }
+        )
+
+        sim_csv = display_sim_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="📥 Export Simulated Workload as CSV",
+            data=sim_csv,
+            file_name=f"tokenlens_simulated_workload_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            key="export_simulated_csv"
+        )
 
 
 # =========================================================================
 # 5. TASK MANAGER (MANAGER-TO-TEAM-LEADER WORKLOAD & QUOTA DELEGATION)
 # =========================================================================
+
 
 elif active_view == "Task Manager" and is_team_leader:
     st.title("My Delegated Workloads")
