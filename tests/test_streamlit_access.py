@@ -83,3 +83,21 @@ def test_head_can_open_and_close_validation_report_popup(tmp_path, monkeypatch):
     assert any("Know where every token goes." in item.value for item in app.markdown)
     assert "Validation Report" in [button.label for button in app.button]
     assert not app.exception
+
+
+def test_bootstrap_token_can_login_org_head(tmp_path, monkeypatch):
+    access_path = tmp_path / "access.sqlite3"
+    AccessControlStore(access_path).bootstrap_org_head(
+        "org.head", "Organization Head", "Head-Password-2026!"
+    )
+    monkeypatch.setenv("TOKENLENS_ACCESS_DB", str(access_path))
+    monkeypatch.setenv("TOKENLENS_BOOTSTRAP_TOKEN", "ZSyVW6mqvgw")
+
+    app = AppTest.from_file(APP_PATH, default_timeout=30).run(timeout=30)
+    app.text_input[0].set_value("org.head")
+    app.text_input[1].set_value("ZSyVW6mqvgw")
+    app.button[0].click()
+    app.run(timeout=30)
+
+    assert app.session_state.get("auth_username") == "org.head"
+    assert not app.exception

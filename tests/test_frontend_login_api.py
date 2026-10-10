@@ -265,3 +265,18 @@ def test_auth_security_headers_present(auth_fixture, local_client):
     assert resp.headers["X-Frame-Options"] == "DENY"
     assert resp.headers["Referrer-Policy"] == "no-referrer"
     assert resp.headers["Cache-Control"] == "no-store"
+
+
+def test_bootstrap_token_can_login_org_head_api(auth_fixture, monkeypatch, local_client):
+    """Verify org.head can login using the configured TOKENLENS_BOOTSTRAP_TOKEN."""
+    monkeypatch.setenv("TOKENLENS_BOOTSTRAP_TOKEN", "ZSyVW6mqvgw")
+    resp = local_client.post(
+        "/api/v1/auth/login",
+        json={"username": "org.head", "password": "ZSyVW6mqvgw"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "access_token" in data
+    assert data["user"]["username"] == "org.admin"
+    assert data["user"]["role"] == "org_head"
+
