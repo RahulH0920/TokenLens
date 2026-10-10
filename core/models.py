@@ -106,3 +106,22 @@ class GuardrailEvaluationResult(BaseModel):
     budget_limit_usd: Decimal
     utilization_pct: float
     message: str
+
+
+class DelegatedTask(BaseModel):
+    task_id: str
+    task_name: str
+    department: str
+    team_leader: str
+    manager_name: str = "Engineering Manager"
+    model: str
+    allocated_input_tokens: int = Field(ge=0)
+    allocated_output_tokens: int = Field(ge=0)
+    allocated_budget_usd: Decimal = Field(ge=0)
+    consumed_tokens: int = Field(default=0, ge=0)
+    consumed_spend_usd: Decimal = Field(default=Decimal("0.0"), ge=0)
+    priority: str = "Medium"  # 'Critical' | 'High' | 'Medium' | 'Low'
+    status: str = "Assigned"  # 'Assigned' | 'In Progress' | 'Completed' | 'Blocked'
+    created_at: datetime
+    notes: Optional[str] = None
+

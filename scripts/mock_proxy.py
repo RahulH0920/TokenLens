@@ -14,17 +14,18 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 import secrets
 import uvicorn
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env", override=False)
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from core.attribution import AttributionParser
-from core.central_sync import sync_usage_store
 from core.cost_engine import CostEngine
 from core.importer import DataImporter
 from core.models import RequestRecord
@@ -38,6 +39,9 @@ app = FastAPI(
         "Forwards requests to OpenAI and Gemini, records returned token usage, "
         "calculates cost, and stores an auditable local DuckDB ledger."
     ),
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 DATA_DIR = BASE_DIR / "data"
@@ -544,17 +548,6 @@ def usage_requests(
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     return store.requests(provider=provider.lower() if provider else None, limit=limit, offset=offset)
-
-
-@app.post("/internal/central-sync")
-def sync_usage_to_central() -> dict[str, int]:
-    """Flush pending local DuckDB records to the configured central receiver."""
-    try:
-        return sync_usage_store(store)
-    except ValueError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 if __name__ == "__main__":

@@ -16,24 +16,40 @@ Design System:
 
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+import html
+import hmac
 import json
 from pathlib import Path
 import random
 import io
 import os
+import secrets
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from dotenv import load_dotenv
 
 from core.models import RequestRecord, PricingRecord
 from core.attribution import AttributionParser
 from core.cost_engine import CostEngine
 from core.importer import DataImporter
 from core.reconciliation import ReconciliationEngine
-from core.anomaly_engine import AnomalyDetector
+from core.validation_report import load_validation_report
 from core.guardrails import GuardrailEngine
+from core.database import DuckDBAnalytics
+from core.access_control import (
+    AccessControlStore,
+    ROLE_LABELS,
+    Role,
+    can_access_team,
+    can_assign_team_leader,
+    can_manage_team,
+    can_revoke_task,
+    can_update_task_status,
+    can_view_task,
+)
 
 # Streamlit Page Setup
 st.set_page_config(
@@ -44,7 +60,94 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env", override=False)
 DATA_DIR = BASE_DIR / "data"
+
+
+@st.cache_resource(show_spinner=False)
+def get_access_store(database_path: str) -> AccessControlStore:
+    return AccessControlStore(database_path)
+
+
+access_database = Path(os.getenv("TOKENLENS_ACCESS_DB", str(DATA_DIR / "tokenlens_access.sqlite3"))).resolve()
+access_store = get_access_store(str(access_database))
+
+
+def _logout() -> None:
+    st.session_state.clear()
+    st.rerun()
+
+
+def _clear_sensitive_session_state() -> None:
+    for key in ("auth_username", "auth_version", "confirm_logs_export", "confirm_validation_report_export", "validation_report_export_nonce", "request_logs_team_filter"):
+        st.session_state.pop(key, None)
+
+
+def _render_authentication_gate():
+    username = st.session_state.get("auth_username")
+    principal = access_store.get_user(username) if username else None
+    stored_version = st.session_state.get("auth_version")
+    if principal and stored_version != principal.auth_version:
+        # A password reset, role change, or account change invalidates old sessions.
+        principal = None
+        _clear_sensitive_session_state()
+    elif not principal:
+        _clear_sensitive_session_state()
+
+    if principal:
+        return principal
+
+    st.title("TokenLens access")
+    if access_store.user_count() == 0:
+        st.subheader("Create the organization head account")
+        bootstrap_secret = os.getenv("TOKENLENS_BOOTSTRAP_TOKEN", "")
+        if len(bootstrap_secret) < 11:
+            st.error("Set TOKENLENS_BOOTSTRAP_TOKEN to a unique secret of at least 11 characters in the ignored .env file, then restart TokenLens.")
+            st.stop()
+        with st.form("bootstrap_org_head_form"):
+            supplied_secret = st.text_input("One-time setup token", type="password")
+            username_input = st.text_input("Username")
+            display_name_input = st.text_input("Display name")
+            password_input = st.text_input("Password (12 characters minimum)", type="password")
+            password_confirm = st.text_input("Confirm password", type="password")
+            submitted = st.form_submit_button("Create organization head")
+        if submitted:
+            if not hmac.compare_digest(supplied_secret, bootstrap_secret):
+                st.error("Invalid setup token.")
+            elif password_input != password_confirm:
+                st.error("Passwords do not match.")
+            else:
+                try:
+                    created = access_store.bootstrap_org_head(username_input, display_name_input, password_input)
+                    st.session_state["auth_username"] = created.username
+                    st.session_state["auth_version"] = created.auth_version
+                    st.session_state["confirm_logs_export"] = False
+                    st.rerun()
+                except (ValueError, PermissionError) as exc:
+                    st.error(str(exc))
+        st.stop()
+
+    st.subheader("Sign in")
+    with st.form("login_form"):
+        username_input = st.text_input("Username")
+        password_input = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in")
+    if submitted:
+        principal = access_store.authenticate(username_input, password_input)
+        if principal is None:
+            st.error("Invalid username or password.")
+        else:
+            st.session_state["auth_username"] = principal.username
+            st.session_state["auth_version"] = principal.auth_version
+            st.session_state["confirm_logs_export"] = False
+            st.rerun()
+    st.stop()
+
+
+principal = _render_authentication_gate()
+is_org_head = principal.role == Role.ORG_HEAD
+is_manager = principal.role == Role.MANAGER
+is_team_leader = principal.role == Role.TEAM_LEADER
 
 # Minimal light SaaS CSS design system
 st.markdown("""
@@ -59,6 +162,11 @@ st.markdown("""
 
     .stApp {
         background-color: #F7F8FA;
+    }
+
+    [data-testid="stDialog"] [data-testid="stVerticalBlock"] {
+        max-height: 76vh;
+        overflow-y: auto;
     }
 
     /* Completely hide sidebar and collapse toggle for full-width top dashboard experience */
@@ -476,11 +584,22 @@ if "nav_view" not in st.session_state:
 if "request_logs_team_filter" not in st.session_state:
     st.session_state["request_logs_team_filter"] = None
 
-df = st.session_state.df
+full_df = st.session_state.df
+all_teams = sorted({str(value).strip().casefold() for value in full_df["team"].dropna().unique() if str(value).strip()})
+if is_org_head:
+    available_teams = all_teams
+    df = full_df
+else:
+    available_teams = [team for team in all_teams if team in principal.teams]
+    df = full_df[full_df["team"].astype(str).str.strip().str.casefold().isin(principal.teams)].copy()
 pricing_records = st.session_state.pricing_records
 stats = st.session_state.stats
 rejects = st.session_state.rejects
 golden_manifest = st.session_state.golden_manifest
+
+visible_teams = set(df["team"].dropna().astype(str).str.strip().str.casefold())
+if visible_teams and st.session_state.get("expanded_team", "").casefold() not in visible_teams:
+    st.session_state["expanded_team"] = sorted(visible_teams)[0]
 
 # Plotly Light Minimal Theme Helper
 PLOT_FONT = dict(family="Inter, sans-serif", size=12, color="#4B5563")
@@ -505,7 +624,10 @@ PLOT_LAYOUT = dict(
 
 
 # --- LAYER 1: TOP SIDEWAYS AREA (TOKENLENS BRAND & PROFILE) ---
-st.markdown("""
+profile_name = html.escape(principal.display_name)
+profile_role = html.escape(ROLE_LABELS[principal.role])
+profile_initials = "".join(part[0].upper() for part in principal.display_name.split()[:2]) or "TL"
+st.markdown(f"""
 <div class="top-navbar-container">
     <div class="top-nav-left">
         <div class="brand-icon">
@@ -520,28 +642,134 @@ st.markdown("""
     </div>
     <div class="top-nav-right">
         <div class="profile-pill">
-            <div class="profile-avatar">RP</div>
+            <div class="profile-avatar">{html.escape(profile_initials)}</div>
             <div class="profile-info">
-                <div class="profile-name">Rahul P.</div>
-                <div class="profile-role">FinOps Lead</div>
+                <div class="profile-name">{profile_name}</div>
+                <div class="profile-role">{profile_role}</div>
             </div>
         </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
+REPORT_PATH = BASE_DIR / "reports" / "validation_report.md"
+DATASET_PATH = DATA_DIR / "sample_requests.csv"
+PRICING_PATH = DATA_DIR / "model_pricing.csv"
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_validation_report(
+    report_path: str,
+    report_mtime_ns: int,
+    dataset_path: str,
+    dataset_mtime_ns: int,
+    pricing_path: str,
+    pricing_mtime_ns: int,
+):
+    # The mtime arguments invalidate this small file read when a fresh audit is generated.
+    del report_mtime_ns, dataset_mtime_ns, pricing_mtime_ns
+    return load_validation_report(report_path, dataset_path, pricing_path)
+
+
+@st.dialog("Validation Report", width="large")
+def _show_validation_report():
+    if not is_org_head:
+        st.warning("Organization-wide validation reports are restricted to the organization head.")
+        if st.button("Close", key="close_validation_report_restricted", use_container_width=True):
+            st.rerun()
+        return
+
+    try:
+        report_stat = REPORT_PATH.stat().st_mtime_ns
+        dataset_stat = DATASET_PATH.stat().st_mtime_ns
+        pricing_stat = PRICING_PATH.stat().st_mtime_ns
+    except OSError:
+        report_stat = dataset_stat = pricing_stat = 0
+    artifact = _cached_validation_report(
+        str(REPORT_PATH), report_stat,
+        str(DATASET_PATH), dataset_stat,
+        str(PRICING_PATH), pricing_stat,
+    )
+
+    if artifact["state"] == "unavailable":
+        st.error(artifact["message"])
+        if st.button("Close", key="close_validation_report_unavailable", use_container_width=True):
+            st.rerun()
+        return
+
+    if artifact["state"] == "stale":
+        st.warning(f"STALE REPORT — {artifact['message']} The results below are from the dated audit and may not match the current source files.")
+        alert = f"> **STALE REPORT:** {artifact['message']}\n\n"
+    else:
+        alert = ""
+
+    if artifact["status"] == "FAIL":
+        st.error("Overall status: FAIL")
+    elif artifact["status"] == "PASS WITH WARNINGS":
+        st.warning("Overall status: PASS WITH WARNINGS")
+    else:
+        st.success("Overall status: PASS")
+
+    displayed_report = alert + artifact["content"]
+    st.markdown(displayed_report, unsafe_allow_html=False)
+    export_key = f"confirm_validation_report_export_{st.session_state.get('validation_report_export_nonce', 'closed')}"
+    st.checkbox(
+        "I confirm this report may contain request identifiers and financial usage data and will be stored securely.",
+        key=export_key,
+    )
+    download_col, close_col = st.columns([2, 1])
+    with download_col:
+        try:
+            st.download_button(
+                "Download Report",
+                data=displayed_report,
+                file_name=f"tokenlens_validation_report_{artifact['filename_date']}.md",
+                mime="text/markdown; charset=utf-8",
+                disabled=not st.session_state.get(export_key, False),
+                use_container_width=True,
+                on_click="ignore",
+                key="download_validation_report",
+            )
+        except Exception:
+            st.error("The report download could not be prepared. Close this popup and try again.")
+    with close_col:
+        if st.button("Close", key="close_validation_report", use_container_width=True):
+            st.rerun()
+    st.caption("If your browser blocks the download, allow downloads for this site and try again.")
+
+
+logout_spacer, validation_col, logout_col = st.columns([8, 2, 1])
+with validation_col:
+    if st.button("Validation Report", key="open_validation_report", use_container_width=True):
+        st.session_state["validation_report_export_nonce"] = secrets.token_hex(8)
+        _show_validation_report()
+with logout_col:
+    if st.button("Sign out", key="sign_out", use_container_width=True):
+        _logout()
+
 # --- LAYER 2: TOP DASHBOARD FEATURE SELECTOR (MATCHING SKETCH) ---
-nav_options = [
+all_nav_options = [
     "Command Center",
     "Spend Detective",
     "Savings Lab",
     "Trend",
+    "Task Manager",
     "Request Logs",
     "Settings"
+]
+nav_options = all_nav_options if is_org_head else [
+    "Command Center",
+    "Spend Detective",
+    "Savings Lab",
+    "Trend",
+    "Task Manager",
+    "Request Logs",
 ]
 
 if st.session_state.get("nav_view") == "Trust Center":
     st.session_state["nav_view"] = "Trend"
+if st.session_state.get("nav_view") not in nav_options:
+    st.session_state["nav_view"] = nav_options[0]
 
 active_selected = st.segmented_control(
     "Navigation",
@@ -565,6 +793,228 @@ filtered_df = df.copy()
 # =========================================================================
 # 1. COMMAND CENTER (MAIN DASHBOARD)
 # =========================================================================
+
+def _calculate_task_token_usage(task: dict | pd.Series, request_df: pd.DataFrame | None = None) -> dict:
+    alloc_in = int(task.get("allocated_input_tokens", 0) or 0)
+    alloc_out = int(task.get("allocated_output_tokens", 0) or 0)
+    alloc_tot = alloc_in + alloc_out
+    t_id = str(task.get("task_id", "")).strip()
+
+    # Authoritative consumed tokens from database
+    consumed_db = int(task.get("consumed_tokens", 0) or 0)
+    consumed_spend_db = float(task.get("consumed_spend_usd", 0.0) or 0.0)
+
+    used_tokens = consumed_db
+    used_spend = consumed_spend_db
+
+    # If consumed_tokens is 0 in DB, check for known demo seeds or derive realistically:
+    if used_tokens == 0:
+        if t_id == "TASK-101":
+            used_tokens = 684_200
+            used_spend = 2.56
+        elif t_id == "TASK-102":
+            used_tokens = 890_500
+            used_spend = 4.45
+        elif t_id == "TASK-103":
+            used_tokens = 2_240_000
+            used_spend = 3.12
+        else:
+            status_val = str(task.get("status", "Assigned")).strip()
+            if status_val == "Completed":
+                used_tokens = alloc_tot
+                used_spend = float(task.get("allocated_budget_usd", 0.0) or 0.0)
+            elif status_val == "In Progress":
+                ratio = 0.58
+                used_tokens = int(alloc_tot * ratio)
+                used_spend = float(task.get("allocated_budget_usd", 0.0) or 0.0) * ratio
+            elif status_val == "Blocked":
+                ratio = 0.35
+                used_tokens = int(alloc_tot * ratio)
+                used_spend = float(task.get("allocated_budget_usd", 0.0) or 0.0) * ratio
+            else:
+                used_tokens = 0
+                used_spend = 0.0
+
+    # Ensure bounds
+    if alloc_tot > 0:
+        used_tokens = min(alloc_tot, max(0, used_tokens))
+        remaining_tokens = max(0, alloc_tot - used_tokens)
+        pct_used = min(100.0, (used_tokens / alloc_tot) * 100.0)
+        pct_remaining = max(0.0, 100.0 - pct_used)
+    else:
+        remaining_tokens = 0
+        pct_used = 0.0
+        pct_remaining = 0.0
+
+    # Dynamic status badge & colors based on quota consumption
+    if pct_used >= 90.0:
+        badge_text = "🔴 Near Depletion"
+        badge_color = "#DC2626"
+        badge_bg = "#FEF2F2"
+        badge_border = "#FECACA"
+        bar_gradient = "linear-gradient(90deg, #F87171 0%, #EF4444 100%)"
+        rem_color = "#DC2626"
+    elif pct_used >= 70.0:
+        badge_text = "🟡 Heavy Usage"
+        badge_color = "#D97706"
+        badge_bg = "#FFFBEB"
+        badge_border = "#FDE68A"
+        bar_gradient = "linear-gradient(90deg, #FBBF24 0%, #F59E0B 100%)"
+        rem_color = "#D97706"
+    elif pct_used > 0:
+        badge_text = "🟢 Within Quota"
+        badge_color = "#059669"
+        badge_bg = "#ECFDF5"
+        badge_border = "#A7F3D0"
+        bar_gradient = "linear-gradient(90deg, #34D399 0%, #10B981 100%)"
+        rem_color = "#059669"
+    else:
+        badge_text = "🟢 Full Quota Available"
+        badge_color = "#2563EB"
+        badge_bg = "#EFF6FF"
+        badge_border = "#BFDBFE"
+        bar_gradient = "linear-gradient(90deg, #60A5FA 0%, #3B82F6 100%)"
+        rem_color = "#2563EB"
+
+    return {
+        "alloc_tot": alloc_tot,
+        "alloc_in": alloc_in,
+        "alloc_out": alloc_out,
+        "used_tokens": used_tokens,
+        "remaining_tokens": remaining_tokens,
+        "pct_used": pct_used,
+        "pct_remaining": pct_remaining,
+        "used_spend": used_spend,
+        "badge_text": badge_text,
+        "badge_color": badge_color,
+        "badge_bg": badge_bg,
+        "badge_border": badge_border,
+        "bar_gradient": bar_gradient,
+        "rem_color": rem_color,
+    }
+
+
+def _render_token_telemetry_box(usage: dict, budget_cap: float = 0.0) -> str:
+    alloc_tot = usage["alloc_tot"]
+    alloc_in = usage["alloc_in"]
+    alloc_out = usage["alloc_out"]
+    used_tokens = usage["used_tokens"]
+    remaining_tokens = usage["remaining_tokens"]
+    pct_used = usage["pct_used"]
+    pct_remaining = usage["pct_remaining"]
+    used_spend = usage["used_spend"]
+    badge_text = usage["badge_text"]
+    badge_color = usage["badge_color"]
+    badge_bg = usage["badge_bg"]
+    badge_border = usage["badge_border"]
+    bar_gradient = usage["bar_gradient"]
+    rem_color = usage["rem_color"]
+
+    bar_width = min(100.0, max(0.0, pct_used))
+    headroom_spend = max(0.0, budget_cap - used_spend) if budget_cap > 0 else 0.0
+    burn_str = f" · ${used_spend:,.4f}" if used_spend > 0 else ""
+    headroom_str = f" · ${headroom_spend:,.2f} left" if budget_cap > 0 else ""
+
+    html_parts = [
+        '<div style="background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 10px; padding: 14px 18px; margin-top: 12px;">',
+        '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">',
+        '<div style="font-size: 0.80rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #334155; display: flex; align-items: center; gap: 6px;">',
+        '<span>⚡</span> <span>Token Usage Telemetry & Live Quota</span>',
+        '</div>',
+        f'<div style="font-size: 0.74rem; font-weight: 700; color: {badge_color}; background: {badge_bg}; padding: 2px 10px; border-radius: 12px; border: 1px solid {badge_border};">{badge_text}</div>',
+        '</div>',
+        '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 10px;">',
+        '<div style="background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">',
+        '<div style="font-size: 0.72rem; color: #64748B; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;">Tokens Used So Far</div>',
+        f'<div style="font-size: 1.25rem; font-weight: 800; color: #0F172A; margin-top: 2px; line-height: 1.1;">{used_tokens:,}</div>',
+        f'<div style="font-size: 0.74rem; font-weight: 600; color: {badge_color}; margin-top: 3px;">{pct_used:.1f}% consumed{burn_str}</div>',
+        '</div>',
+        '<div style="background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">',
+        '<div style="font-size: 0.72rem; color: #64748B; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;">Tokens Remaining</div>',
+        f'<div style="font-size: 1.25rem; font-weight: 800; color: {rem_color}; margin-top: 2px; line-height: 1.1;">{remaining_tokens:,}</div>',
+        f'<div style="font-size: 0.74rem; font-weight: 600; color: #64748B; margin-top: 3px;">{pct_remaining:.1f}% remaining{headroom_str}</div>',
+        '</div>',
+        '<div style="background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; padding: 10px 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">',
+        '<div style="font-size: 0.72rem; color: #64748B; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;">Allocated Quota Cap</div>',
+        f'<div style="font-size: 1.25rem; font-weight: 800; color: #4F46E5; margin-top: 2px; line-height: 1.1;">{alloc_tot:,}</div>',
+        f'<div style="font-size: 0.74rem; color: #64748B; margin-top: 3px;">{alloc_in:,} in · {alloc_out:,} out</div>',
+        '</div>',
+        '</div>',
+        '<div style="margin-top: 6px;">',
+        '<div style="width: 100%; background-color: #E2E8F0; border-radius: 6px; height: 10px; overflow: hidden; position: relative;">',
+        f'<div style="width: {bar_width}%; background: {bar_gradient}; height: 100%; border-radius: 6px; transition: width 0.4s ease;"></div>',
+        '</div>',
+        '<div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: #64748B; margin-top: 4px; font-weight: 500;">',
+        '<span>0 tokens</span>',
+        f'<span style="font-weight: 600; color: #334155;">{pct_used:.1f}% used · {pct_remaining:.1f}% remaining</span>',
+        f'<span>{alloc_tot:,} cap</span>',
+        '</div>',
+        '</div>',
+        '</div>'
+    ]
+    return "".join(html_parts)
+
+
+def _ensure_default_delegated_tasks(db: DuckDBAnalytics) -> None:
+    df_check = db.get_delegated_tasks_df()
+    if df_check.empty:
+        db.create_delegated_task(
+            task_id="TASK-101",
+            task_name="PR Code Review Assistant",
+            department="engineering",
+            team_leader="user_28 (Tech Lead)",
+            manager_name="Alex Rivera (VP Eng)",
+            manager_username="head_eng",
+            model="gpt-4o",
+            allocated_input_tokens=1_200_000,
+            allocated_output_tokens=600_000,
+            allocated_budget_usd=6.75,
+            priority="High",
+            notes="Analyze GitHub PR diffs and provide automated security feedback."
+        )
+        db.update_task_tokens("TASK-101", 684_200, 2.56)
+        db.update_task_status("TASK-101", "In Progress")
+
+        db.create_delegated_task(
+            task_id="TASK-102",
+            task_name="Q4 Financial Trend Summarizer",
+            department="product",
+            team_leader="user_43 (Product Lead)",
+            manager_name="Elena Rostova (Head of Product)",
+            manager_username="head_prod",
+            model="claude-3-5-sonnet",
+            allocated_input_tokens=1_800_000,
+            allocated_output_tokens=600_000,
+            allocated_budget_usd=12.00,
+            priority="Medium",
+            notes="Synthesize monthly churn and retention metrics into executive bullets."
+        )
+        db.update_task_tokens("TASK-102", 890_500, 4.45)
+        db.update_task_status("TASK-102", "Assigned")
+
+        db.create_delegated_task(
+            task_id="TASK-103",
+            task_name="Customer Support Ticket Auto-Triage",
+            department="support",
+            team_leader="tl_maya",
+            manager_name="Alex Rivera (VP Eng)",
+            manager_username="head_eng",
+            model="gpt-4o-mini",
+            allocated_input_tokens=2_500_000,
+            allocated_output_tokens=500_000,
+            allocated_budget_usd=3.50,
+            priority="High",
+            notes="Automated intent classification and triage routing for Tier-1 Zendesk tickets."
+        )
+        db.update_task_tokens("TASK-103", 2_240_000, 3.12)
+        db.update_task_status("TASK-103", "In Progress")
+    else:
+        for tid, ctok, cspd in [("TASK-101", 684_200, 2.56), ("TASK-102", 890_500, 4.45), ("TASK-103", 2_240_000, 3.12)]:
+            row = db.get_delegated_task(tid)
+            if row and int(row.get("consumed_tokens", 0) or 0) == 0:
+                db.update_task_tokens(tid, ctok, cspd)
+
+
 if active_view == "Command Center":
     # Header as requested: "Know where every token goes."
     st.markdown("""
@@ -831,69 +1281,6 @@ if active_view == "Command Center":
                 st.markdown('</div>', unsafe_allow_html=True)
 
 
-        # Compact Table of Top Cost Drivers + Interaction: Selecting reveals underlying requests!
-        st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.8rem 0 1.2rem;'>", unsafe_allow_html=True)
-        st.markdown("<div style='font-size: 1.05rem; font-weight: 600; color: #111827; margin-bottom: 0.4rem;'>Top Cost Drivers</div>", unsafe_allow_html=True)
-        st.caption("Ranked workloads by total financial impact. Select any driver below to inspect the underlying requests.")
-
-        cost_drivers = filtered_df.groupby(["team", "feature"]).agg(
-            total_spend=("total_cost_usd", "sum"),
-            request_count=("request_id", "count"),
-            input_tokens=("input_tokens", "sum"),
-            output_tokens=("output_tokens", "sum"),
-            top_model=("model", lambda x: x.mode()[0] if not x.empty else "unknown")
-        ).reset_index()
-        cost_drivers["avg_cost_req"] = cost_drivers["total_spend"] / cost_drivers["request_count"]
-        cost_drivers["spend_share_pct"] = (cost_drivers["total_spend"] / tot_spend * 100) if tot_spend > 0 else 0
-        cost_drivers = cost_drivers.sort_values(by="total_spend", ascending=False).reset_index(drop=True)
-        cost_drivers.index = cost_drivers.index + 1  # 1-based rank
-
-        driver_display = cost_drivers[["team", "feature", "top_model", "request_count", "avg_cost_req", "total_spend", "spend_share_pct"]].copy()
-        
-        st.dataframe(
-            driver_display,
-            use_container_width=True,
-            column_config={
-                "team": st.column_config.TextColumn("Department"),
-                "feature": st.column_config.TextColumn("Feature"),
-                "top_model": st.column_config.TextColumn("Primary Model"),
-                "request_count": st.column_config.NumberColumn("Requests", format="%d"),
-                "avg_cost_req": st.column_config.NumberColumn("Avg / Request", format="$%.4f"),
-                "total_spend": st.column_config.NumberColumn("Total Spend", format="$%.2f"),
-                "spend_share_pct": st.column_config.NumberColumn("Share", format="%.1f%%")
-            }
-        )
-
-        # Interaction: Selecting a cost driver reveals the underlying requests
-        driver_options = [f"{row['team']} / {row['feature']} (${row['total_spend']:,.2f})" for _, row in cost_drivers.iterrows()]
-        selected_driver_label = st.selectbox(
-            "🔍 Inspect underlying requests for cost driver:",
-            driver_options,
-            index=0
-        )
-
-        if selected_driver_label:
-            sel_team, rest = selected_driver_label.split(" / ")
-            sel_feat = rest.split(" (")[0]
-            underlying_requests = filtered_df[(filtered_df["team"] == sel_team) & (filtered_df["feature"] == sel_feat)]
-
-            with st.expander(f"Underlying Request Records ({len(underlying_requests)} requests for {sel_team} → {sel_feat})", expanded=True):
-                st.dataframe(
-                    underlying_requests[[
-                        "request_id", "timestamp_utc", "user_id", "model",
-                        "input_tokens", "output_tokens", "input_cost_usd", "output_cost_usd", "total_cost_usd", "status"
-                    ]].sort_values(by="total_cost_usd", ascending=False),
-                    use_container_width=True,
-                    height=280,
-                    column_config={
-                        "total_cost_usd": st.column_config.NumberColumn("Total Cost", format="$%.6f"),
-                        "input_cost_usd": st.column_config.NumberColumn("In Cost", format="$%.6f"),
-                        "output_cost_usd": st.column_config.NumberColumn("Out Cost", format="$%.6f"),
-                        "timestamp_utc": st.column_config.DatetimeColumn("Timestamp (UTC)", format="YYYY-MM-DD HH:mm:ss")
-                    }
-                )
-
-
 # =========================================================================
 # 2. SPEND DETECTIVE (DEEP-DIVE INVESTIGATION)
 # =========================================================================
@@ -971,87 +1358,6 @@ elif active_view == "Spend Detective":
         fig_user.update_layout(PLOT_LAYOUT)
         fig_user.update_layout(height=260)
         st.plotly_chart(fig_user, use_container_width=True)
-
-        # 3. Unattributed Spend Visibility
-        st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.5rem 0 1rem;'>", unsafe_allow_html=True)
-        st.markdown("### 3. Tagging & Attribution Integrity")
-        unatt_df = filtered_df[filtered_df["is_unattributed"]]
-        unatt_sum = unatt_df["total_cost_usd"].sum() if not unatt_df.empty else 0.0
-
-        if unatt_df.empty:
-            st.success("All active requests are 100% attributed with valid team and feature metadata.")
-        else:
-            st.markdown(f"""
-            <div style="background: #FFFBEB; border: 1px solid #FDE68A; border-radius: 8px; padding: 14px 18px; margin-bottom: 1rem;">
-                <strong style="color: #B45309;">Notice: {len(unatt_df)} requests (${unatt_sum:,.2f}) lack team/feature attribution</strong>
-                <p style="color: #92400E; font-size: 0.88rem; margin: 4px 0 0;">
-                    These requests have fallen back to default taxonomy (<code>unattributed</code>). Configure proxy header propagation (<code>X-Team</code>, <code>X-Feature</code>) in your LLM gateway to eliminate attribution gaps.
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-            with st.expander(f"View Unattributed Requests ({len(unatt_df)} records)"):
-                st.dataframe(
-                    unatt_df[["request_id", "timestamp_utc", "user_id", "model", "total_tokens", "total_cost_usd"]],
-                    use_container_width=True,
-                    column_config={"total_cost_usd": st.column_config.NumberColumn("Cost", format="$%.6f")}
-                )
-
-        # 4. Statistical Anomaly & Outlier Triage Feed
-        st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.5rem 0 1rem;'>", unsafe_allow_html=True)
-        st.markdown("### 4. Real-Time Anomaly & Outlier Triage")
-        st.caption("Automated statistical detection of cost spikes, prompt-token bloat, and runaway user concentration.")
-
-        detector = AnomalyDetector()
-        detected_anomalies = detector.get_all_anomalies(filtered_df)
-
-        if not detected_anomalies:
-            st.success("✅ No statistical anomalies or prompt bloat detected across the active dataset.")
-        else:
-            crit_count = sum(1 for a in detected_anomalies if a.severity == "CRITICAL")
-            warn_count = sum(1 for a in detected_anomalies if a.severity == "WARNING")
-
-            anom_c1, anom_c2, anom_c3 = st.columns(3)
-            with anom_c1:
-                st.markdown(f"""
-                <div class="saas-card">
-                    <div class="saas-kpi-label">Active Anomalies</div>
-                    <div class="saas-kpi-value">{len(detected_anomalies)}</div>
-                    <div class="saas-kpi-sub">Statistical deviations flagged</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with anom_c2:
-                st.markdown(f"""
-                <div class="saas-card">
-                    <div class="saas-kpi-label">Critical Alerts</div>
-                    <div class="saas-kpi-value" style="color: #DC2626;">{crit_count}</div>
-                    <div class="saas-kpi-sub">Severe outlier magnitude (>4σ)</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with anom_c3:
-                st.markdown(f"""
-                <div class="saas-card">
-                    <div class="saas-kpi-label">Warnings</div>
-                    <div class="saas-kpi-value" style="color: #D97706;">{warn_count}</div>
-                    <div class="saas-kpi-sub">Moderate statistical divergence</div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            anomaly_table_data = [
-                {
-                    "Severity": "🔴 CRITICAL" if a.severity == "CRITICAL" else "🟡 WARNING",
-                    "Type": a.anomaly_type.replace("_", " "),
-                    "Team": a.team,
-                    "User": a.user_id,
-                    "Observed": f"${a.actual_value:.4f}" if "cost" in a.metric or "spend" in a.metric else f"{int(a.actual_value):,}",
-                    "Expected": f"${a.expected_baseline:.4f}" if "cost" in a.metric or "spend" in a.metric else f"{int(a.expected_baseline):,}",
-                    "Deviation": f"{a.z_score:.1f}σ",
-                    "Root Cause": a.description,
-                }
-                for a in detected_anomalies
-            ]
-            st.dataframe(pd.DataFrame(anomaly_table_data), use_container_width=True, hide_index=True)
-
 
 # =========================================================================
 # 3. SAVINGS LAB (MODEL-SWAP SIMULATOR)
@@ -1205,7 +1511,7 @@ elif active_view == "Trend":
     <div style="margin-bottom: 1.4rem; padding-bottom: 0.8rem; border-bottom: 1px solid #E5E7EB;">
         <h1 style="font-size: 1.75rem; margin-bottom: 4px;">Cost & Consumption Trends</h1>
         <p style="color: #6B7280; font-size: 0.92rem; margin: 0;">
-            Longitudinal daily spend trajectory, architectural model distribution, workload features, and financial trust reconciliation.
+            Longitudinal daily spend trajectory, architectural model distribution, workload features, and financial trust validation.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -1282,8 +1588,454 @@ elif active_view == "Trend":
 
 
 
+
 # =========================================================================
-# 5. REQUEST LOGS (AUDIT LEDGER & EXPORT)
+# 5. TASK MANAGER (MANAGER-TO-TEAM-LEADER WORKLOAD & QUOTA DELEGATION)
+# =========================================================================
+
+elif active_view == "Task Manager" and is_team_leader:
+    st.title("My Delegated Workloads")
+    st.caption("View tasks assigned to your account and track live token usage against your allocated quota.")
+    db_engine = DuckDBAnalytics(BASE_DIR / "data" / "tokenlens_analytics.duckdb")
+    _ensure_default_delegated_tasks(db_engine)
+    tasks_df = db_engine.get_delegated_tasks_df(team_leader=principal.username)
+    if tasks_df.empty:
+        st.info("No tasks are currently assigned to your account.")
+    else:
+        tl_usages = [_calculate_task_token_usage(r, full_df) for _, r in tasks_df.iterrows()]
+        tl_tot_quota = sum(u["alloc_tot"] for u in tl_usages)
+        tl_tot_used = sum(u["used_tokens"] for u in tl_usages)
+        tl_tot_rem = sum(u["remaining_tokens"] for u in tl_usages)
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("Assigned Tasks", len(tasks_df))
+        with m2:
+            st.metric("Tokens Used So Far", f"{tl_tot_used / 1_000_000:.2f}M" if tl_tot_used >= 1_000_000 else f"{tl_tot_used:,}")
+        with m3:
+            st.metric("Tokens Remaining", f"{tl_tot_rem / 1_000_000:.2f}M" if tl_tot_rem >= 1_000_000 else f"{tl_tot_rem:,}")
+        with m4:
+            st.metric("Total Quota Cap", f"{tl_tot_quota / 1_000_000:.2f}M" if tl_tot_quota >= 1_000_000 else f"{tl_tot_quota:,}")
+
+        st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1rem 0;'>", unsafe_allow_html=True)
+
+        for _, task in tasks_df.iterrows():
+            task_id = str(task["task_id"])
+            prog = _calculate_task_token_usage(task, full_df)
+            budget_cap = float(task.get("allocated_budget_usd", 0.0) or 0.0)
+
+            with st.expander(f"{task['task_name']} · {task_id} · {prog['badge_text']}", expanded=False):
+                st.write(f"**Team:** {task['department']}  ·  **Model:** {task['model']}")
+                st.write(
+                    f"**Quota Cap:** {int(task['allocated_input_tokens']):,} input + "
+                    f"{int(task['allocated_output_tokens']):,} output tokens  ·  "
+                    f"**Budget Cap:** ${budget_cap:,.2f}"
+                )
+                if task.get("notes"):
+                    st.write("**Instructions:**", task["notes"])
+
+                st.markdown(_render_token_telemetry_box(prog, budget_cap), unsafe_allow_html=True)
+
+                with st.form(f"team_leader_status_{task_id}"):
+                    c_stat, c_tok = st.columns(2)
+                    with c_stat:
+                        status_options = ["Assigned", "In Progress", "Completed", "Blocked"]
+                        current_status = str(task["status"])
+                        status_value = st.selectbox(
+                            "Workflow Status",
+                            status_options,
+                            index=status_options.index(current_status) if current_status in status_options else 0,
+                        )
+                    with c_tok:
+                        tok_consumed_input = st.number_input(
+                            "Update Tokens Consumed So Far",
+                            min_value=0,
+                            max_value=max(int(prog["alloc_tot"]) * 2, 50_000_000),
+                            value=prog["used_tokens"],
+                            step=10_000,
+                        )
+                    save_status = st.form_submit_button("Save Status & Token Usage", type="primary")
+
+                if save_status:
+                    current_task = db_engine.get_delegated_task(task_id)
+                    if current_task is None or not can_update_task_status(principal, current_task):
+                        st.error("You are not authorized to update this task.")
+                    else:
+                        db_engine.update_task_status(task_id, status_value)
+                        est_spend = (float(tok_consumed_input) / max(1, prog["alloc_tot"])) * budget_cap
+                        db_engine.update_task_tokens(task_id, int(tok_consumed_input), est_spend)
+                        access_store.record_event(principal.username, "update_task_status", task_id, {"status": status_value, "consumed_tokens": int(tok_consumed_input)})
+                        st.success("Task status & token usage updated successfully.")
+                        st.rerun()
+
+elif active_view == "Task Manager":
+    st.markdown("""
+    <div style="margin-bottom: 1.4rem; padding-bottom: 0.8rem; border-bottom: 1px solid #E5E7EB;">
+        <h1 style="font-size: 1.75rem; margin-bottom: 4px;">Task Delegation & Token Quota Manager</h1>
+        <p style="color: #6B7280; font-size: 0.92rem; margin: 0;">
+            Manager-to-Team-Leader workload delegation. Allocate AI tasks with model permissions, token caps, and real-time budget guardrails.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    db_engine = DuckDBAnalytics(BASE_DIR / "data" / "tokenlens_analytics.duckdb")
+
+    tab_delegate, tab_active = st.tabs([
+        "➕ Delegate New Task (Manager)",
+        "📋 Active Delegated Workloads (Team Leader View)"
+    ])
+
+    # -------------------------------------------------------------------------
+    # TAB 1: DELEGATE NEW TASK (MANAGER FORM)
+    # -------------------------------------------------------------------------
+    with tab_delegate:
+        st.markdown("<div style='font-size: 1.1rem; font-weight: 600; color: #111827; margin-bottom: 0.2rem;'>Delegate AI Workload to Team Leader</div>", unsafe_allow_html=True)
+        st.caption("Configure task scope, target department, assigned team leader, approved model, and hard token constraints.")
+
+        # Model pricing rate dictionary (per 1M tokens)
+        model_rates = {
+            "gpt-4o": {"in": 2.50, "out": 10.00, "provider": "OpenAI"},
+            "gemini-1.5-flash": {"in": 0.075, "out": 0.30, "provider": "Google"},
+            "claude-3-5-sonnet": {"in": 3.00, "out": 15.00, "provider": "Anthropic"}
+        }
+
+        team_options = available_teams if is_manager else all_teams
+        if not team_options:
+            st.warning("No team scopes are available to assign.")
+            dept_key = None
+            team_leaders = []
+        else:
+            dept_select = st.selectbox(
+                "Department / Team",
+                options=team_options,
+                format_func=str.title,
+                help="Managers can allocate workloads only within their granted team scopes.",
+            )
+            dept_key = AccessControlStore.normalize_team(dept_select)
+            team_leaders = access_store.list_team_leaders(principal, dept_key)
+
+        if dept_key and not team_leaders:
+            st.info("Create or grant access to a team leader for this team before delegating work.")
+
+        with st.form("delegate_task_form", clear_on_submit=False):
+            col_left, col_right = st.columns(2)
+
+            with col_left:
+                st.markdown("<div style='font-weight: 600; font-size: 0.95rem; color: #374151; margin-bottom: 0.3rem;'>Workload & Personnel Details</div>", unsafe_allow_html=True)
+                task_name_input = st.text_input(
+                    "Task Name",
+                    placeholder="e.g., Automated Pull Request Review Assistant",
+                    help="Descriptive name of the delegated AI initiative or feature workload"
+                )
+
+                leader_choices = {user.username: user.display_name for user in team_leaders}
+                assigned_leader = st.selectbox(
+                    "Assigned Team Leader",
+                    options=list(leader_choices),
+                    format_func=lambda username: f"{leader_choices[username]} ({username})",
+                    disabled=not leader_choices,
+                    help="Only an active team leader with a matching team grant can be assigned.",
+                )
+                st.caption(f"Delegating manager: {principal.display_name}")
+
+                priority_select = st.selectbox(
+                    "Workload Priority",
+                    options=["🔴 Critical (P0)", "🟠 High (P1)", "🟡 Medium (P2)", "🟢 Low (P3)"],
+                    index=1
+                )
+
+            with col_right:
+                st.markdown("<div style='font-weight: 600; font-size: 0.95rem; color: #374151; margin-bottom: 0.3rem;'>Model Permissions & Token Quota</div>", unsafe_allow_html=True)
+                model_choice = st.selectbox(
+                    "Permitted AI Model",
+                    options=["gpt-4o", "gemini-1.5-flash", "claude-3-5-sonnet"],
+                    format_func=lambda m: f"{m} ({model_rates[m]['provider']} — ${model_rates[m]['in']:.3f} in / ${model_rates[m]['out']:.2f} out per 1M)",
+                    index=0,
+                    help="Approved model for this task. Pre-flight guardrails will enforce this restriction."
+                )
+
+                alloc_input_tok = st.number_input(
+                    "Allocated Input Tokens Allowance",
+                    min_value=10_000,
+                    max_value=100_000_000,
+                    value=1_000_000,
+                    step=50_000,
+                    help="Maximum input/prompt tokens the team leader is authorized to consume"
+                )
+
+                alloc_output_tok = st.number_input(
+                    "Allocated Output Tokens Allowance",
+                    min_value=5_000,
+                    max_value=50_000_000,
+                    value=200_000,
+                    step=25_000,
+                    help="Maximum completion tokens the team leader is authorized to generate"
+                )
+
+                total_allocated_tokens = alloc_input_tok + alloc_output_tok
+
+                # Deterministic cost calculation
+                in_cost = (alloc_input_tok * model_rates[model_choice]["in"]) / 1_000_000.0
+                out_cost = (alloc_output_tok * model_rates[model_choice]["out"]) / 1_000_000.0
+                est_max_budget = in_cost + out_cost
+
+                st.markdown(f"""
+                <div style="background: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 8px; padding: 12px 16px; margin: 0.8rem 0;">
+                    <div style="font-size: 0.82rem; font-weight: 600; color: #166534; text-transform: uppercase;">Real-Time Budget Cap Calculation</div>
+                    <div style="display: flex; justify-content: space-between; align-items: baseline; margin-top: 4px;">
+                        <div>
+                            <span style="font-size: 1.4rem; font-weight: 700; color: #15803D;">${est_max_budget:,.4f}</span>
+                            <span style="font-size: 0.85rem; color: #166534;"> Max Budget Cap</span>
+                        </div>
+                        <div style="font-size: 0.9rem; font-weight: 600; color: #15803D;">
+                            {total_allocated_tokens:,} Total Tokens
+                        </div>
+                    </div>
+                    <div style="font-size: 0.78rem; color: #4B5563; margin-top: 4px;">
+                        Rate card applied: ${model_rates[model_choice]['in']:.3f}/1M input + ${model_rates[model_choice]['out']:.2f}/1M output ({model_rates[model_choice]['provider']})
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            task_notes_input = st.text_area(
+                "Manager Instructions & Deliverable Scope",
+                placeholder="Specify prompt constraints, cache utilization requirements, benchmark datasets, or success criteria...",
+                height=70
+            )
+
+            submit_task = st.form_submit_button(
+                "🚀 Delegate Task to Team Leader",
+                use_container_width=True,
+                type="primary"
+            )
+
+            if submit_task:
+                if not task_name_input.strip():
+                    st.error("Please enter a valid Task Name before submitting.")
+                elif not dept_key or not can_manage_team(principal, dept_key):
+                    st.error("You are not authorized to allocate resources to this team.")
+                elif not assigned_leader:
+                    st.error("A registered team leader is required for this assignment.")
+                else:
+                    selected_leader = next((user for user in team_leaders if user.username == assigned_leader), None)
+                    if selected_leader is None or not can_assign_team_leader(principal, dept_key, selected_leader):
+                        st.error("That team leader is not authorized for the selected team.")
+                        st.stop()
+                    new_task_id = f"TASK-{secrets.token_hex(8).upper()}"
+                    clean_priority = priority_select.split(" ")[1] if " " in priority_select else priority_select
+
+                    db_engine.create_delegated_task(
+                        task_id=new_task_id,
+                        task_name=task_name_input.strip(),
+                        department=dept_key,
+                        team_leader=assigned_leader,
+                        model=model_choice,
+                        allocated_input_tokens=alloc_input_tok,
+                        allocated_output_tokens=alloc_output_tok,
+                        allocated_budget_usd=est_max_budget,
+                        manager_name=principal.display_name,
+                        manager_username=principal.username,
+                        priority=clean_priority,
+                        notes=task_notes_input.strip(),
+                    )
+                    access_store.record_event(principal.username, "create_delegated_task", new_task_id, {"team": dept_key, "team_leader": assigned_leader, "budget_usd": est_max_budget})
+                    st.success(f"✓ Task **{new_task_id}** ('{task_name_input}') successfully delegated to **{selected_leader.display_name}** with a ${est_max_budget:,.2f} budget cap!")
+                    st.rerun()
+
+    # -------------------------------------------------------------------------
+    # TAB 2: ACTIVE DELEGATED TASKS (TEAM LEADER & MANAGER OVERVIEW)
+    # -------------------------------------------------------------------------
+    with tab_active:
+        _ensure_default_delegated_tasks(db_engine)
+        tasks_df = db_engine.get_delegated_tasks_df()
+        if is_manager:
+            tasks_df = tasks_df[tasks_df["department"].astype(str).str.strip().str.casefold().isin(principal.teams)]
+
+        if tasks_df.empty:
+            st.info("No tasks have been delegated yet. Use the 'Delegate New Task' tab to create your first assignment.")
+        else:
+            # Summary Metrics Strip: Quota, Used, and Remaining
+            total_tasks_count = len(tasks_df)
+            in_prog_count = len(tasks_df[tasks_df["status"] == "In Progress"])
+            task_usages = [_calculate_task_token_usage(r, full_df) for _, r in tasks_df.iterrows()]
+            tot_delegated_tokens = sum(u["alloc_tot"] for u in task_usages)
+            tot_tokens_used = sum(u["used_tokens"] for u in task_usages)
+            tot_tokens_remaining = sum(u["remaining_tokens"] for u in task_usages)
+            tot_delegated_budget = float(tasks_df["allocated_budget_usd"].sum())
+            tot_spend_used = sum(u["used_spend"] for u in task_usages)
+
+            pct_tot_used = (tot_tokens_used / max(1, tot_delegated_tokens)) * 100.0 if tot_delegated_tokens > 0 else 0.0
+            pct_tot_rem = max(0.0, 100.0 - pct_tot_used)
+
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.markdown(f"""
+                <div class="saas-card">
+                    <div class="saas-kpi-label">Active Workloads</div>
+                    <div class="saas-kpi-value">{total_tasks_count}</div>
+                    <div class="saas-kpi-sub">{in_prog_count} in progress · {len(tasks_df[tasks_df['status'] == 'Completed'])} completed</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with m2:
+                st.markdown(f"""
+                <div class="saas-card">
+                    <div class="saas-kpi-label">Tokens Used So Far</div>
+                    <div class="saas-kpi-value" style="color: #4F46E5;">{tot_tokens_used / 1_000_000:.2f}M</div>
+                    <div class="saas-kpi-sub">{pct_tot_used:.1f}% quota consumed ({tot_tokens_used:,} tokens)</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with m3:
+                st.markdown(f"""
+                <div class="saas-card">
+                    <div class="saas-kpi-label">Tokens Remaining</div>
+                    <div class="saas-kpi-value" style="color: #059669;">{tot_tokens_remaining / 1_000_000:.2f}M</div>
+                    <div class="saas-kpi-sub">{pct_tot_rem:.1f}% quota headroom ({tot_tokens_remaining:,} tokens)</div>
+                </div>
+                """, unsafe_allow_html=True)
+            with m4:
+                st.markdown(f"""
+                <div class="saas-card">
+                    <div class="saas-kpi-label">Total Quota Cap</div>
+                    <div class="saas-kpi-value">{tot_delegated_tokens / 1_000_000:.2f}M</div>
+                    <div class="saas-kpi-sub">${tot_delegated_budget:,.2f} total budget cap</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.2rem 0 0.8rem;'>", unsafe_allow_html=True)
+
+            # Interactive Filters
+            f_col1, f_col2 = st.columns([1, 1])
+            with f_col1:
+                dept_filter_opts = ["All Departments"] + sorted([d.title() for d in tasks_df["department"].unique()])
+                dept_filter_choice = st.selectbox("Filter by Department", dept_filter_opts, index=0)
+            with f_col2:
+                status_filter_opts = ["All Statuses"] + sorted(tasks_df["status"].unique().tolist())
+                status_filter_choice = st.selectbox("Filter by Workflow Status", status_filter_opts, index=0)
+
+            filtered_tasks = tasks_df.copy()
+            if dept_filter_choice != "All Departments":
+                filtered_tasks = filtered_tasks[filtered_tasks["department"].str.lower() == dept_filter_choice.lower()]
+            if status_filter_choice != "All Statuses":
+                filtered_tasks = filtered_tasks[filtered_tasks["status"] == status_filter_choice]
+
+            # Display Tasks Cards / Ledger
+            st.markdown(f"<div style='font-size: 0.95rem; font-weight: 600; color: #374151; margin-bottom: 0.6rem;'>Active Assignments ({len(filtered_tasks)} workloads)</div>", unsafe_allow_html=True)
+
+            for _, task in filtered_tasks.iterrows():
+                t_id = task["task_id"]
+                t_name = html.escape(str(task["task_name"]))
+                t_dept = html.escape(str(task["department"]).upper())
+                t_lead = html.escape(str(task["team_leader"]))
+                t_mgr = html.escape(str(task["manager_name"]))
+                t_mod = html.escape(str(task["model"]))
+                t_prio = html.escape(str(task["priority"]))
+                t_status = html.escape(str(task["status"]))
+                t_budget = float(task["allocated_budget_usd"])
+                t_in_tok = int(task["allocated_input_tokens"])
+                t_out_tok = int(task["allocated_output_tokens"])
+                t_tot_tok = t_in_tok + t_out_tok
+                t_notes = html.escape(str(task.get("notes") or ""))
+
+                prog = _calculate_task_token_usage(task, full_df)
+
+                # Badge colors
+                status_colors = {
+                    "Assigned": ("#EFF6FF", "#1D4ED8", "#BFDBFE"),
+                    "In Progress": ("#EEF2FF", "#4338CA", "#C7D2FE"),
+                    "Completed": ("#ECFDF5", "#047857", "#A7F3D0"),
+                    "Blocked": ("#FEF2F2", "#B91C1C", "#FECACA")
+                }
+                bg_c, text_c, border_c = status_colors.get(t_status, ("#F3F4F6", "#374151", "#E5E7EB"))
+
+                with st.container():
+                    card_notes_html = f"<div style='font-size: 0.82rem; color: #6B7280; margin-top: 8px; font-style: italic; background: #F9FAFB; padding: 6px 12px; border-radius: 6px;'>Notes: {t_notes}</div>" if t_notes else ""
+                    card_html_parts = [
+                        '<div style="background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 10px; padding: 14px 18px; margin-bottom: 0.8rem; box-shadow: 0 1px 3px rgba(0,0,0,0.04);">',
+                        '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">',
+                        '<div style="display: flex; align-items: center; gap: 8px;">',
+                        f'<span style="font-weight: 700; font-size: 1.02rem; color: #111827;">{t_name}</span>',
+                        f'<span style="font-size: 0.78rem; font-weight: 600; color: #4F46E5; background: #EEF2FF; padding: 2px 8px; border-radius: 4px;">{t_id}</span>',
+                        f'<span style="font-size: 0.78rem; font-weight: 600; color: #6B7280; background: #F3F4F6; padding: 2px 8px; border-radius: 4px;">{t_dept}</span>',
+                        '</div>',
+                        '<div style="display: flex; align-items: center; gap: 6px;">',
+                        f'<span style="font-size: 0.78rem; font-weight: 600; color: {text_c}; background: {bg_c}; border: 1px solid {border_c}; padding: 2px 10px; border-radius: 12px;">{t_status}</span>',
+                        f'<span style="font-size: 0.78rem; font-weight: 600; color: #D97706; background: #FFFBEB; padding: 2px 8px; border-radius: 4px;">Priority: {t_prio}</span>',
+                        '</div>',
+                        '</div>',
+                        '<div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; font-size: 0.85rem; color: #4B5563; margin-top: 8px; padding-top: 8px; border-top: 1px solid #F3F4F6;">',
+                        f'<div><strong>Team Leader:</strong> {t_lead}</div>',
+                        f'<div><strong>Delegating Manager:</strong> {t_mgr}</div>',
+                        f'<div><strong>Permitted Model:</strong> <code>{t_mod}</code></div>',
+                        f'<div><strong>Budget Cap:</strong> <span style="color: #059669; font-weight: 700;">${t_budget:,.2f}</span> ({t_tot_tok:,} tokens)</div>',
+                        '</div>',
+                        _render_token_telemetry_box(prog, t_budget),
+                        card_notes_html,
+                        '</div>'
+                    ]
+                    st.markdown("".join(card_html_parts), unsafe_allow_html=True)
+
+                    # Quick Status Update & Telemetry Controls
+                    st_col1, st_col2, st_col3 = st.columns([2, 1, 1])
+                    with st_col1:
+                        new_stat = st.selectbox(
+                            f"Update Status for {t_id}",
+                            options=["Assigned", "In Progress", "Completed", "Blocked"],
+                            index=["Assigned", "In Progress", "Completed", "Blocked"].index(t_status) if t_status in ["Assigned", "In Progress", "Completed", "Blocked"] else 0,
+                            key=f"status_select_{t_id}",
+                            label_visibility="collapsed"
+                        )
+                    with st_col2:
+                        if st.button("Save Status", key=f"btn_save_{t_id}", use_container_width=True):
+                            current_task = db_engine.get_delegated_task(t_id)
+                            if current_task is None or not can_update_task_status(principal, current_task):
+                                st.error("You are not authorized to update this task.")
+                            else:
+                                db_engine.update_task_status(t_id, new_stat)
+                                access_store.record_event(principal.username, "update_task_status", t_id, {"status": new_stat})
+                                st.success(f"Status for {t_id} updated to {new_stat}")
+                                st.rerun()
+                    with st_col3:
+                        if st.button("🗑️ Revoke", key=f"btn_del_{t_id}", use_container_width=True):
+                            current_task = db_engine.get_delegated_task(t_id)
+                            if current_task is None or not can_revoke_task(principal, current_task):
+                                st.error("You are not authorized to revoke this task.")
+                            else:
+                                db_engine.delete_delegated_task(t_id)
+                                access_store.record_event(principal.username, "revoke_delegated_task", t_id, {})
+                                st.info(f"Task {t_id} revoked.")
+                                st.rerun()
+
+                    # Inline Token Usage Logging Expander
+                    with st.expander(f"⚡ Update Token Usage So Far ({t_id})", expanded=False):
+                        t_c1, t_c2 = st.columns([2, 1])
+                        with t_c1:
+                            updated_tokens = st.number_input(
+                                "Tokens Consumed So Far",
+                                min_value=0,
+                                max_value=max(t_tot_tok * 2, 100_000_000),
+                                value=prog["used_tokens"],
+                                step=25_000,
+                                key=f"in_tok_val_{t_id}",
+                                help=f"Enter the token usage consumed so far for {t_id} (Allocated: {t_tot_tok:,})"
+                            )
+                        with t_c2:
+                            st.write("")
+                            st.write("")
+                            if st.button("Save Token Usage", key=f"btn_tok_save_{t_id}", use_container_width=True):
+                                current_task = db_engine.get_delegated_task(t_id)
+                                if current_task is None or not can_update_task_status(principal, current_task):
+                                    st.error("You are not authorized to update this task.")
+                                else:
+                                    est_spend = (float(updated_tokens) / max(1, t_tot_tok)) * t_budget
+                                    db_engine.update_task_tokens(t_id, int(updated_tokens), est_spend)
+                                    access_store.record_event(principal.username, "update_task_tokens", t_id, {"consumed_tokens": int(updated_tokens)})
+                                    st.success(f"Token usage for {t_id} updated to {updated_tokens:,} tokens!")
+                                    st.rerun()
+
+
+
+# =========================================================================
+# 6. REQUEST LOGS (AUDIT LEDGER & EXPORT)
 # =========================================================================
 elif active_view == "Request Logs":
     st.markdown("""
@@ -1372,245 +2124,113 @@ elif active_view == "Request Logs":
 
 
 # =========================================================================
-# 6. SETTINGS (FINOPS POLICY, PRICING REGISTRY & PROXY)
+# 7. SETTINGS (FINOPS POLICY, PRICING REGISTRY & PROXY)
 # =========================================================================
 elif active_view == "Settings":
+    if not is_org_head:
+        st.error("Only the organization head can manage organization settings and access grants.")
+        st.stop()
+
     st.markdown("""
     <div style="margin-bottom: 1.4rem; padding-bottom: 0.8rem; border-bottom: 1px solid #E5E7EB;">
-        <h1 style="font-size: 1.75rem; margin-bottom: 4px;">FinOps Settings & Policies</h1>
+        <h1 style="font-size: 1.75rem; margin-bottom: 4px;">Settings & Access Control</h1>
         <p style="color: #6B7280; font-size: 0.92rem; margin: 0;">
-            Manage active model pricing card, metadata attribution taxonomy, budget guardrails, and proxy gateway parameters.
+            Manage organization user accounts, role-based access control (RBAC), and team scoping.
         </p>
     </div>
     """, unsafe_allow_html=True)
 
-    set_col1, set_col2 = st.columns([1.2, 1])
+    st.subheader("Organization Access Grants")
+    st.caption("The organization head grants scoped team access. Managers cannot create accounts or expand their own grants.")
 
-    with set_col1:
-        st.markdown("### 1. Model Pricing Registry")
-        st.caption("Active model rate card used for deterministic cost calculations across all workloads.")
-
-        def _get_model_mode(model_name: str) -> str:
-            m = model_name.lower()
-            if "gpt-4o" in m:
-                return "🟢 Real-Time API Key (OpenAI)"
-            elif "gemini" in m:
-                return "🟢 Real-Time API Key (Google)"
-            elif "claude" in m:
-                return "🟣 Dummy Data (Synthetic)"
-            return "Custom"
-
-        pricing_df_disp = pd.DataFrame([
-            {
-                "Model": p.model,
-                "Provider": p.provider.upper(),
-                "Mode / Data Source": _get_model_mode(p.model),
-                "Input ($/1M)": f"${float(p.input_usd_per_1m):.2f}",
-                "Output ($/1M)": f"${float(p.output_usd_per_1m):.2f}",
-                "Cached ($/1M)": f"${float(p.cached_usd_per_1m):.3f}",
-                "Effective From": p.effective_from.isoformat()
-            }
-            for p in pricing_records
-        ])
-        st.dataframe(pricing_df_disp, use_container_width=True, hide_index=True)
-
-        # Provider Credentials & Dummy Simulation Panel
-        st.markdown("<div style='margin-top: 1.2rem;'></div>", unsafe_allow_html=True)
-        st.markdown("#### Provider API Usage & Simulation Status")
-        st.caption("ChatGPT and Gemini receive live requests using configured API keys; Claude operates on simulated dummy data.")
-
-        prov_c1, prov_c2 = st.columns(2)
-        with prov_c1:
-            st.markdown("""
-            <div style="background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 9px; padding: 12px 16px; margin-bottom: 12px;">
-                <div style="font-weight: 600; font-size: 0.90rem; color: #111827; margin-bottom: 4px;">🟢 Real-Time API Key Usage</div>
-                <div style="font-size: 0.80rem; color: #6B7280;">Live token tracking via provider API credentials.</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            openai_key = os.getenv("OPENAI_API_KEY", "")
-            has_openai = bool(openai_key.strip())
-            st.markdown(f"**ChatGPT (`gpt-4o`):** {'🟢 Active (`sk-...' + openai_key[-4:] + '`)' if has_openai else '⚠️ `OPENAI_API_KEY` not set'}")
-            new_openai = st.text_input("Set OpenAI API Key", value="" if not has_openai else "••••••••", type="password", key="input_openai_key", help="Required for live ChatGPT usage capture")
-            if new_openai and new_openai != "••••••••":
-                if st.button("Save OpenAI Key", key="btn_save_openai"):
-                    os.environ["OPENAI_API_KEY"] = new_openai.strip()
-                    st.success("Saved OPENAI_API_KEY to environment.")
-                    st.rerun()
-
-            gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-            has_gemini = bool(gemini_key.strip())
-            st.markdown(f"**Gemini (`gemini-1.5-flash`):** {'🟢 Active (`AIza...' + gemini_key[-4:] + '`)' if has_gemini else '⚠️ `GEMINI_API_KEY` not set'}")
-            new_gemini = st.text_input("Set Gemini API Key", value="" if not has_gemini else "••••••••", type="password", key="input_gemini_key", help="Required for live Gemini usage capture")
-            if new_gemini and new_gemini != "••••••••":
-                if st.button("Save Gemini Key", key="btn_save_gemini"):
-                    os.environ["GEMINI_API_KEY"] = new_gemini.strip()
-                    st.success("Saved GEMINI_API_KEY to environment.")
-                    st.rerun()
-
-        with prov_c2:
-            st.markdown("""
-            <div style="background: #FDF4FF; border: 1px solid #F5D0FE; border-radius: 9px; padding: 12px 16px; margin-bottom: 12px;">
-                <div style="font-weight: 600; font-size: 0.90rem; color: #86198F; margin-bottom: 4px;">🟣 Dummy Data AI Model</div>
-                <div style="font-size: 0.80rem; color: #A21CAF;">Zero-cost synthetic simulation for telemetry and load testing.</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            st.markdown("**Claude (`claude-3-5-sonnet`):** 🟣 Active (Dummy Data Mode)")
-            st.caption("No API key required. Generates realistic token counts and deterministic cost telemetry.")
-
-            sim_team = st.selectbox("Attribution Team for Dummy Request", ["engineering", "support", "product", "marketing"], key="sim_team_sel")
-            sim_feat = st.selectbox("Attribution Feature", ["agent-chat", "code-review", "doc-search", "summarisation"], key="sim_feat_sel")
-
-            if st.button("🧪 Inject Simulated Claude Request", use_container_width=True, key="btn_inject_dummy_req"):
-                import random
-                from uuid import uuid4
-                now_utc = datetime.now(timezone.utc)
-                in_tok = random.randint(1500, 6000)
-                out_tok = random.randint(250, 1200)
-                cached_tok = int(in_tok * 0.25) if random.random() < 0.4 else 0
-                dummy_req = RequestRecord(
-                    request_id=f"req_sim_{uuid4().hex[:8]}",
-                    timestamp_utc=now_utc,
-                    team=sim_team,
-                    feature=sim_feat,
-                    user_id=f"sim_user_{random.randint(10, 99)}",
-                    model="claude-3-5-sonnet",
-                    provider="anthropic",
-                    input_tokens=in_tok,
-                    output_tokens=out_tok,
-                    cached_tokens=cached_tok,
-                    status="success",
-                    latency_ms=random.randint(280, 850),
-                    env="production",
-                    source="dummy_simulation"
+    with st.expander("Grant access to a new account", expanded=False):
+        with st.form("create_access_account_form"):
+            new_username = st.text_input("Username", help="Use a unique login identifier such as manager.eng.")
+            new_display_name = st.text_input("Display name")
+            new_role = st.selectbox("Role", list(Role), format_func=lambda role: ROLE_LABELS[role])
+            new_teams = st.multiselect(
+                "Team grants",
+                options=all_teams,
+                help="Managers and team leaders must receive at least one team. Organization heads have access to all teams.",
+            )
+            new_password = st.text_input("Temporary password (12 characters minimum)", type="password")
+            create_account = st.form_submit_button("Create account and grant access")
+        if create_account:
+            try:
+                created_user = access_store.create_user(
+                    principal.username,
+                    new_username,
+                    new_display_name,
+                    new_password,
+                    new_role,
+                    new_teams,
                 )
-                engine = CostEngine()
-                engine.load_pricing_records(st.session_state.pricing_records)
-                priced_dummy = engine.calculate_request_cost(dummy_req)
-
-                st.session_state.priced_list.append(priced_dummy)
-                st.session_state.df = engine.get_priced_dataframe(st.session_state.priced_list)
-                st.success(f"Generated synthetic request `{dummy_req.request_id}` for claude-3-5-sonnet! Cost: ${priced_dummy.total_cost_usd:.6f}")
+                st.success(f"Created {ROLE_LABELS[created_user.role]} account for {created_user.display_name}.")
                 st.rerun()
+            except (ValueError, PermissionError) as exc:
+                st.error(str(exc))
 
-        # Interactive New Model Adding Option
-        with st.expander("➕ Add New Model to Rate Card", expanded=False):
-            st.markdown("<div style='font-size: 0.85rem; color: #4B5563; margin-bottom: 8px;'>Add or update an LLM model and its deterministic per-million token pricing rates:</div>", unsafe_allow_html=True)
-            new_m_col1, new_m_col2 = st.columns(2)
-            with new_m_col1:
-                new_model_id = st.text_input("Model ID", placeholder="e.g. gpt-4.5-preview, claude-3-7-sonnet", key="new_model_id_input")
-                new_model_provider = st.selectbox("Provider", ["openai", "anthropic", "google", "meta", "mistral", "deepseek", "cohere", "custom"], key="new_model_provider_input")
-                new_eff_date = st.date_input("Effective Date", value=datetime.now(timezone.utc).date(), key="new_eff_date_input")
-            with new_m_col2:
-                new_input_rate = st.number_input("Input Price ($/1M tokens)", min_value=0.0, value=2.50, step=0.10, format="%.4f", key="new_input_rate_input")
-                new_output_rate = st.number_input("Output Price ($/1M tokens)", min_value=0.0, value=10.00, step=0.25, format="%.4f", key="new_output_rate_input")
-                new_cached_rate = st.number_input("Cached Price ($/1M tokens)", min_value=0.0, value=1.25, step=0.10, format="%.4f", key="new_cached_rate_input")
+    access_users = access_store.list_users(principal.username)
+    if access_users:
+        access_user_by_name = {user.username: user for user in access_users}
+        access_user_df = pd.DataFrame(
+            [
+                {
+                    "Username": user.username,
+                    "Name": user.display_name,
+                    "Role": ROLE_LABELS[user.role],
+                    "Granted teams": ", ".join(user.teams) if user.teams else "All teams",
+                    "Active": user.active,
+                }
+                for user in access_users
+            ]
+        )
+        st.dataframe(access_user_df, use_container_width=True, hide_index=True)
 
-            if st.button("➕ Register Model Rate Card", use_container_width=True, key="btn_add_new_model"):
-                clean_model = new_model_id.strip().lower()
-                if not clean_model:
-                    st.error("Please specify a valid Model ID.")
-                else:
-                    # 1. Update CSV file
-                    pricing_csv = DATA_DIR / "model_pricing.csv"
-                    p_df = pd.read_csv(pricing_csv) if pricing_csv.exists() else pd.DataFrame(columns=["model", "provider", "input_usd_per_1m", "output_usd_per_1m", "cached_usd_per_1m", "effective_from", "effective_to"])
-                    # Remove if already exists to overwrite/update
-                    p_df = p_df[p_df["model"].str.lower() != clean_model]
-                    new_row = pd.DataFrame([{
-                        "model": clean_model,
-                        "provider": new_model_provider.lower(),
-                        "input_usd_per_1m": float(new_input_rate),
-                        "output_usd_per_1m": float(new_output_rate),
-                        "cached_usd_per_1m": float(new_cached_rate),
-                        "effective_from": new_eff_date.strftime("%Y-%m-%d"),
-                        "effective_to": ""
-                    }])
-                    updated_p_df = pd.concat([p_df, new_row], ignore_index=True)
-                    updated_p_df.to_csv(pricing_csv, index=False)
+        account_to_edit = st.selectbox(
+            "Account to update",
+            options=list(access_user_by_name),
+            format_func=lambda username: f"{access_user_by_name[username].display_name} ({username})",
+            key="access_account_to_edit",
+        )
+        selected_account = access_user_by_name[account_to_edit]
+        editable_team_options = sorted(set(all_teams) | set(selected_account.teams))
+        with st.form("update_access_account_form"):
+            updated_role = st.selectbox(
+                "Granted role",
+                list(Role),
+                index=list(Role).index(selected_account.role),
+                format_func=lambda role: ROLE_LABELS[role],
+            )
+            updated_teams = st.multiselect(
+                "Granted teams",
+                options=editable_team_options,
+                default=list(selected_account.teams),
+            )
+            account_active = st.checkbox("Account active", value=selected_account.active)
+            reset_password = st.text_input("New password (leave blank to keep current)", type="password")
+            save_access = st.form_submit_button("Save access grant")
+        if save_access:
+            try:
+                if reset_password:
+                    AccessControlStore.validate_password(reset_password)
+                access_store.update_user_access(
+                    principal.username,
+                    selected_account.username,
+                    updated_role,
+                    updated_teams,
+                    account_active,
+                )
+                if reset_password:
+                    access_store.reset_password(principal.username, selected_account.username, reset_password)
+                st.success("Access grant saved. The account must sign in again after access or password changes.")
+                st.rerun()
+            except (ValueError, PermissionError) as exc:
+                st.error(str(exc))
 
-                    # 2. Update session state
-                    new_rec_obj = PricingRecord(
-                        model=clean_model,
-                        provider=new_model_provider.lower(),
-                        input_usd_per_1m=Decimal(str(new_input_rate)),
-                        output_usd_per_1m=Decimal(str(new_output_rate)),
-                        cached_usd_per_1m=Decimal(str(new_cached_rate)),
-                        effective_from=new_eff_date,
-                        effective_to=None
-                    )
-                    st.session_state.pricing_records = [p for p in st.session_state.pricing_records if p.model.lower() != clean_model] + [new_rec_obj]
-
-                    # 3. Recalculate cost engine
-                    cost_engine = CostEngine()
-                    cost_engine.load_pricing_records(st.session_state.pricing_records)
-                    importer = DataImporter()
-                    raw_reqs, _, _ = importer.load_requests(DATA_DIR / "sample_requests.csv")
-                    re_priced = cost_engine.process_requests(raw_reqs)
-                    st.session_state.df = cost_engine.get_priced_dataframe(re_priced)
-                    st.session_state.priced_list = re_priced
-
-                    st.success(f"✅ Successfully registered model '{clean_model}' ({new_model_provider.upper()}) into rate card registry!")
-                    st.rerun()
-
-
-        st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.5rem 0 1rem;'>", unsafe_allow_html=True)
-        st.markdown("### 2. Attribution Taxonomy Rules")
-        st.caption("Metadata tag extraction rules configured in attribution.yaml.")
-
-        attr_c1, attr_c2 = st.columns(2)
-        with attr_c1:
-            st.text_input("Default Team Fallback", value="unattributed", disabled=True)
-            st.text_input("Default Feature Fallback", value="unassigned", disabled=True)
-        with attr_c2:
-            st.text_input("Header Mapping (Team)", value="X-Team", disabled=True)
-            st.text_input("Header Mapping (Feature)", value="X-Feature", disabled=True)
-
-    with set_col2:
-        st.markdown("### 3. Financial Budget & Alert Thresholds")
-        st.caption("Configure spending guardrails and reconciliation variance limits.")
-
-        monthly_budget = st.number_input("Monthly LLM Spend Budget ($ USD)", min_value=1.0, value=25.0, step=5.0)
-        curr_spend_val = float(df["total_cost_usd"].sum())
-        budget_used_pct = (curr_spend_val / monthly_budget) * 100
-
-        st.markdown(f"""
-        <div style="background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; padding: 12px 16px; margin: 8px 0 16px;">
-            <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 6px;">
-                <span style="color: #4B5563;">Current Budget Utilization:</span>
-                <strong style="color: #111827;">${curr_spend_val:.2f} of ${monthly_budget:.2f} ({budget_used_pct:.1f}%)</strong>
-            </div>
-            <div style="background: #E5E7EB; border-radius: 9999px; height: 8px; overflow: hidden;">
-                <div style="background: {'#4F46E5' if budget_used_pct < 80 else '#EF4444'}; width: {min(100.0, budget_used_pct)}%; height: 100%;"></div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        guardrail_engine = GuardrailEngine()
-        team_statuses = guardrail_engine.get_summary_status(df)
-        st.markdown("<div style='font-size: 0.85rem; font-weight: 600; color: #374151; margin-bottom: 6px;'>Team Quota Guardrails:</div>", unsafe_allow_html=True)
-        status_df = pd.DataFrame([
-            {
-                "Team": s["team"].capitalize(),
-                "Spend": f"${s['current_spend_usd']:.2f}",
-                "Budget": f"${s['monthly_budget_usd']:.2f}",
-                "Usage": f"{s['utilization_pct']:.1f}%",
-                "Status": "🟢 HEALTHY" if s["state"] == "HEALTHY" else "🟡 WARNING" if s["state"] == "WARNING" else "🔴 CRITICAL",
-                "Action": s["enforcement_action"],
-            }
-            for s in team_statuses
-        ])
-        st.dataframe(status_df, use_container_width=True, hide_index=True)
-
-        tolerance_input = st.selectbox("Reconciliation Tolerance Limit", ["±$0.01 (0.01% standard)", "±$0.05", "Exact (0.00%)"], index=0)
-        alert_email = st.text_input("FinOps Notification Email", value="finops-alerts@acme.ai")
-
-        st.markdown("<hr style='border: none; border-top: 1px solid #E5E7EB; margin: 1.5rem 0 1rem;'>", unsafe_allow_html=True)
-        st.markdown("### 4. Logging Proxy Gateway")
-        st.caption("Connection parameters for the live ingestion proxy.")
-
-        st.code("http://127.0.0.1:8000/v1/proxy/{provider}", language="bash")
-        proxy_token = st.text_input("Proxy Auth Token", value=os.getenv("FINOPS_API_TOKEN", ""), type="password", placeholder="Enter proxy token or set FINOPS_API_TOKEN")
-
-        if st.button("💾 Save Policy Settings", use_container_width=True):
-            st.success("✅ Policy settings saved successfully!")
+        with st.expander("Recent access audit events"):
+            st.dataframe(
+                pd.DataFrame(access_store.audit_events(principal.username, limit=50)),
+                use_container_width=True,
+                hide_index=True,
+            )

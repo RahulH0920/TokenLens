@@ -7,13 +7,28 @@
 
 from __future__ import annotations
 
-import os
+import pytest
 from starlette.testclient import TestClient
-
-from api.main import app
 
 TEST_VALID_TOKEN = "a" * 32
 TEST_INVALID_TOKEN = "wrong_secret_token_value_here_123"
+
+from api import main as api_main
+from api.main import app
+
+
+def service_client(client=("127.0.0.1", 50000)):
+    return TestClient(
+        app,
+        client=client,
+        headers={"Authorization": f"Bearer {TEST_VALID_TOKEN}"},
+    )
+
+
+@pytest.fixture(autouse=True)
+def stable_test_service_token(monkeypatch):
+    monkeypatch.setattr(api_main, "API_TOKEN", None)
+    monkeypatch.setenv("FINOPS_API_TOKEN", TEST_VALID_TOKEN)
 
 
 def test_public_health_endpoint_accessible():
@@ -27,21 +42,19 @@ def test_public_health_endpoint_accessible():
 def test_remote_client_rejected_when_no_token_configured(monkeypatch):
     """Verify remote clients are blocked (403) when no FINOPS_API_TOKEN is set."""
     monkeypatch.delenv("FINOPS_API_TOKEN", raising=False)
+    monkeypatch.setattr(api_main, "API_TOKEN", None)
     client = TestClient(app, client=("198.51.100.25", 54321))
     response = client.get("/api/v1/summary")
     assert response.status_code == 403
     assert "Remote access is disabled" in response.json()["detail"]
 
 
-def test_localhost_client_allowed_when_no_token_configured(monkeypatch):
-    """Verify loopback clients can access API during local development without token."""
-    monkeypatch.delenv("FINOPS_API_TOKEN", raising=False)
+def test_localhost_client_requires_user_or_service_credentials(monkeypatch):
+    """Loopback transport is not itself an account credential."""
+    monkeypatch.setenv("FINOPS_API_TOKEN", TEST_VALID_TOKEN)
     client = TestClient(app, client=("127.0.0.1", 50000))
     response = client.get("/api/v1/options")
-    assert response.status_code == 200
-    data = response.json()
-    assert "team" in data
-    assert "model" in data
+    assert response.status_code == 401
 
 
 def test_unauthorized_call_rejected_without_bearer_token(monkeypatch):
@@ -68,7 +81,7 @@ def test_unauthorized_call_rejected_with_invalid_token(monkeypatch):
 def test_authorized_call_succeeds_with_valid_bearer_token(monkeypatch):
     """Verify valid Bearer token authenticates successfully for both local and remote callers."""
     monkeypatch.setenv("FINOPS_API_TOKEN", TEST_VALID_TOKEN)
-    client = TestClient(app, client=("198.51.100.25", 54321))
+    client = service_client(("198.51.100.25", 54321))
     response = client.get(
         "/api/v1/summary",
         headers={"Authorization": f"Bearer {TEST_VALID_TOKEN}"},
@@ -81,7 +94,7 @@ def test_authorized_call_succeeds_with_valid_bearer_token(monkeypatch):
 
 def test_security_response_headers_present():
     """Verify baseline security headers and cache prevention are applied to responses."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     response = client.get("/health")
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["X-Frame-Options"] == "DENY"
@@ -92,7 +105,7 @@ def test_security_response_headers_present():
 
 def test_request_validation_forbids_extra_fields():
     """Verify request body strictly forbids extraneous fields (mass assignment guard)."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     payload = {
         "request_id": "sec_test_extra_01",
         "model": "gpt-4o",
@@ -106,7 +119,7 @@ def test_request_validation_forbids_extra_fields():
 
 def test_request_validation_cached_tokens_cannot_exceed_input():
     """Verify logical consistency: cached_tokens <= input_tokens."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     payload = {
         "request_id": "sec_test_tokens_02",
         "model": "gpt-4o",
@@ -120,7 +133,7 @@ def test_request_validation_cached_tokens_cannot_exceed_input():
 
 def test_request_validation_mutually_exclusive_timestamps():
     """Verify providing both timestamp and timestamp_utc is rejected."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     payload = {
         "request_id": "sec_test_timestamps_03",
         "model": "gpt-4o",
@@ -135,7 +148,7 @@ def test_request_validation_mutually_exclusive_timestamps():
 
 def test_request_validation_negative_token_count_rejected():
     """Verify negative token counts are rejected."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     payload = {
         "request_id": "sec_test_neg_04",
         "model": "gpt-4o",
@@ -148,7 +161,7 @@ def test_request_validation_negative_token_count_rejected():
 
 def test_post_requires_content_length():
     """Verify POST requests without Content-Length are rejected with 411 Length Required."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     # Send raw request without content-length header
     response = client.post("/api/v1/requests", content=b"{}", headers={"content-length": ""})
     assert response.status_code in {411, 413}
@@ -156,7 +169,7 @@ def test_post_requires_content_length():
 
 def test_oversized_payload_rejected_with_413():
     """Verify requests declaring Content-Length > MAX_BODY_BYTES are rejected with 413."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     response = client.post(
         "/api/v1/requests",
         content=b"{}",
@@ -168,7 +181,7 @@ def test_oversized_payload_rejected_with_413():
 
 def test_duplicate_request_id_rejected_with_409():
     """Verify duplicate request_id returns 409 Conflict."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     payload = {
         "request_id": "duplicate_id_sec_test_999",
         "model": "gpt-4o",
@@ -187,7 +200,7 @@ def test_duplicate_request_id_rejected_with_409():
 
 def test_query_validation_date_range_inverted():
     """Verify invalid date ranges return 422."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     response = client.get("/api/v1/summary?start_date=2026-10-10&end_date=2026-10-01")
     assert response.status_code == 422
     assert "start_date must be on or before end_date" in response.json()["detail"]
@@ -195,6 +208,6 @@ def test_query_validation_date_range_inverted():
 
 def test_query_validation_pagination_limits():
     """Verify requests pagination limit cannot exceed 1000."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    client = service_client()
     response = client.get("/api/v1/requests?limit=5000")
     assert response.status_code == 422

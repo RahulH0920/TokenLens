@@ -157,7 +157,8 @@ class UsageStore:
                 SELECT COUNT(*), COALESCE(SUM(input_tokens), 0),
                        COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(output_tokens), 0),
                        COALESCE(SUM(total_cost_usd), 0),
-                       COALESCE(SUM(CASE WHEN missing_price THEN 1 ELSE 0 END), 0)
+                       COALESCE(SUM(CASE WHEN missing_price THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN central_synced = FALSE THEN 1 ELSE 0 END), 0)
                 FROM usage_events
                 """
             ).fetchone()
@@ -172,6 +173,7 @@ class UsageStore:
             "total_cost_usd": float(total[4]),
             "providers": dict(providers),
             "missing_price_requests": total[5],
+            "central_pending_requests": total[6],
         }
 
     def breakdown(self, column: str) -> list[dict]:
@@ -211,7 +213,7 @@ class UsageStore:
                        team, feature, user_id, env, input_tokens, output_tokens,
                        cached_tokens, latency_ms, status, source, input_cost_usd,
                        output_cost_usd, cached_cost_usd, total_cost_usd,
-                       missing_price, is_unattributed
+                       missing_price, is_unattributed, central_synced
                 FROM usage_events
                 WHERE (? IS NULL OR lower(provider) = ?)
                 ORDER BY timestamp_utc DESC, request_id

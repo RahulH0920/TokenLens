@@ -138,9 +138,15 @@ def test_guardrails_evaluation_allow_warn_block():
     assert "BUDGET BREACH" in res_block.message
 
 
-def test_guardrails_api_endpoints():
+def test_guardrails_api_endpoints(monkeypatch):
     """Verify /api/v1/anomalies and /api/v1/guardrails endpoints."""
-    client = TestClient(app, client=("127.0.0.1", 50000))
+    token = "a" * 32
+    monkeypatch.setenv("FINOPS_API_TOKEN", token)
+    client = TestClient(
+        app,
+        client=("127.0.0.1", 50000),
+        headers={"Authorization": f"Bearer {token}"},
+    )
 
     # 1. Anomalies endpoint
     res_anomalies = client.get("/api/v1/anomalies")

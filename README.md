@@ -38,7 +38,7 @@ d:/LLM_FINOPS/
 │   ├── importer.py                 # CSV ingestion, deduplication, and reject routing
 │   └── reconciliation.py           # Independent reconciliation & audit report generator
 ├── reports/
-│   └── reconciliation_report.md    # Formal audit and reconciliation report
+│   └── validation_report.md        # Validation report comparing dashboard totals with known expected values
 ├── scripts/
 │   ├── generate_synthetic_data.py  # Generates test dataset and golden manifests
 │   ├── run_independent_validation.py # Standalone CLI for running financial reconciliation
@@ -84,15 +84,15 @@ python -m streamlit run app.py
 Open your browser at `http://localhost:8501` to view:
 - **Usage & Cost Visuals:** KPI strip, spend by team, input vs output daily tokens, model donut, team $\times$ model heatmap.
 - **Attribution & Drill-Down Ledger:** Multi-level drill-down with CSV export.
-- **Reconciliation & Audit Report:** Expected vs actual verification matrix and spot-checks.
+- **Validation Report:** Comparing dashboard totals with known expected values (verification matrix and spot-checks).
 - **Spend Detective:** Top cost driver finding and What-If model swap simulator.
 - **Live Request Logger:** Interactive test form to log and price requests on-the-fly.
 
-### 2. Run Independent Financial Reconciliation CLI
+### 2. Run Independent Validation CLI
 ```bash
 python scripts/run_independent_validation.py
 ```
-Outputs audit statistics and generates `reports/reconciliation_report.md`.
+Outputs audit statistics and generates `reports/validation_report.md`.
 
 ### 3. Run Automated Pytest Suite
 ```bash
@@ -108,29 +108,39 @@ The API serves the seeded CSV dataset and exposes JSON endpoints for dashboard K
 python -m uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Open `http://127.0.0.1:8000/docs` for the interactive API contract. Main endpoints:
+Main endpoints:
 
 Local CORS is enabled for Streamlit on port 8501 and common React dev servers on ports 5173 and 3000. Set `FINOPS_CORS_ORIGINS` to a comma-separated list of allowed frontend origins when the UI runs elsewhere. A Streamlit Python process calling the API server-side does not rely on browser CORS.
 
 #### Security setup
 
 - The documented Uvicorn command binds to `127.0.0.1`; keep that binding for local development. Streamlit is also configured to bind only to `127.0.0.1`. Without `FINOPS_API_TOKEN`, the API rejects non-loopback clients even if Uvicorn is accidentally started on a public interface.
-- For a private server-to-server deployment, set a random `FINOPS_API_TOKEN` of at least 32 characters. All API routes except `/health` then require `Authorization: Bearer <token>`. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+- API data routes require credentials even on loopback. Create the initial organization-head account in Streamlit, then use `POST /auth/login` with its username and password. The response contains a one-hour bearer credential; pass it as `Authorization: Bearer <access_token>`. `POST /auth/logout` revokes that credential. API sessions use the same role and team grants as the dashboard.
+- API bootstrap is also available at `POST /auth/bootstrap`, but it is disabled unless a random `TOKENLENS_BOOTSTRAP_TOKEN` of at least 11 characters is configured. Generate an 11-character token with `python -c "import secrets; print(secrets.token_urlsafe(8))"`. Use `GET /auth/status` to check whether initial setup is complete; it does not reveal credentials.
+- For server-to-server clients, set a random `FINOPS_API_TOKEN` of at least 32 characters. This service credential has organization-wide access; keep it server-side. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Remote clients still need `FINOPS_API_TOKEN` for access and for credential login; without it the API rejects non-loopback clients.
+- Set `FINOPS_API_SESSION_TTL_SECONDS` to a value from 60 to 86400 to change the account session lifetime (default 3600 seconds).
+- Login attempts are throttled after five failures in five minutes, with a five-minute lockout by default. `FINOPS_AUTH_MAX_ATTEMPTS`, `FINOPS_AUTH_WINDOW_SECONDS`, and `FINOPS_AUTH_LOCKOUT_SECONDS` tune the limits. Remote account login can skip sending the service token only when `FINOPS_ALLOW_REMOTE_LOGIN=true`; the server still requires `FINOPS_API_TOKEN` to be configured and should only be exposed behind HTTPS.
 - Set `FINOPS_ENV=production` in production. The service refuses to start without `FINOPS_API_TOKEN`.
 - Set `FINOPS_ALLOWED_HOSTS` to the API hostnames, `FINOPS_CORS_ORIGINS` to exact frontend origins, and terminate TLS at a trusted reverse proxy. Set `FINOPS_BEHIND_HTTPS_PROXY=true` only when HTTPS is enforced at that proxy.
 - The API token is a service credential. Never embed it in browser JavaScript or a public mobile app. A public multi-user frontend should use an identity provider and a server-side session or API gateway that validates short-lived user tokens and enforces user/team access. Add deployment-level rate limits, secret management, and persistent storage before exposing it to the internet.
 - Request bodies are limited to 64 KiB by default, POST requests must declare `Content-Length`, and demo writes are capped at 10,000 requests per process. Both limits can be adjusted with `FINOPS_MAX_BODY_BYTES` and `FINOPS_MAX_IN_MEMORY_REQUESTS`.
-- Ledger CSV and reconciliation report downloads ask the operator to confirm secure handling because exports contain request identifiers, user identifiers, and usage data. Keep exported files in access-controlled storage and remove them when no longer needed.
+- Ledger CSV and validation report downloads ask the operator to confirm secure handling because exports contain request identifiers, user identifiers, and usage data. Keep exported files in access-controlled storage and remove them when no longer needed.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | API status |
+| `GET /auth/status` | Public setup-completion status |
+| `POST /auth/bootstrap` | Create the first organization head with the one-time setup secret |
+| `POST /auth/login` | Exchange account credentials for a short-lived bearer session |
+| `GET /auth/me` | Return the current account's role and team grants |
+| `POST /auth/logout` | Revoke the current account bearer session |
 | `GET /api/v1/options` | Filter options for team, feature, model, user, provider, status, and environment |
 | `GET /api/v1/summary` | KPI totals; accepts date, attribution, provider, status, and environment filters |
 | `GET /api/v1/breakdown?by=team` | Aggregates by team, feature, model, user, or date |
 | `GET /api/v1/requests` | Filterable, paginated request ledger |
 | `POST /api/v1/requests` | Validate, price, and add one request to the running demo |
-| `GET /api/v1/reconciliation` | Expected-versus-actual checks for the seeded dataset |
+| `GET /api/v1/validation` | Validation report comparing dashboard totals with known expected values |
+| `GET /api/v1/reconciliation` | Alias for validation checks comparing dashboard totals with known expected values |
 | `GET /api/v1/anomalies` | Statistical anomalies (cost spikes, token bloat, runaway users) |
 | `GET /api/v1/guardrails` | Live team budget utilization and health states |
 | `POST /api/v1/guardrails/check` | Pre-flight request evaluation against team quotas (ALLOW/WARN/BLOCK) |
@@ -139,11 +149,11 @@ Local CORS is enabled for Streamlit on port 8501 and common React dev servers on
 
 ### 5. Run the OpenAI + Gemini usage proxy
 
-The local proxy forwards requests to the real provider APIs and captures the token usage returned by each provider. It does not fetch historical usage for calls made outside TokenLens. Set keys in the shell environment; never put them in source, Streamlit settings, or the DuckDB file.
+The local proxy forwards requests to the real provider APIs and captures the token usage returned by each provider. It does not fetch historical usage for calls made outside TokenLens. Copy `.env.example` to `.env` and enter provider keys locally; `.env` is Git-ignored. Never put keys in source, Streamlit settings, or the DuckDB file.
 
 ```powershell
-$env:OPENAI_API_KEY = "<your OpenAI API key>"
-$env:GEMINI_API_KEY = "<your Gemini API key>"
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
 python scripts/mock_proxy.py
 ```
 
@@ -177,49 +187,3 @@ curl http://127.0.0.1:8000/v1beta/models/gemini-2.5-flash:generateContent \
   -H "Content-Type: application/json" -H "X-Team: analytics" -H "X-Feature: summarisation" \
   -d '{"contents":[{"role":"user","parts":[{"text":"Explain a hash map briefly."}]}]}'
 ```
-
-### 6. Central PostgreSQL receiver using pgAdmin
-
-Each host keeps its request ledger in local DuckDB. Its TokenLens proxy sends unsynced usage rows to the central PostgreSQL receiver; the DuckDB file itself, prompts, and provider API keys are not transferred. PostgreSQL deduplicates retries by `(host_id, request_id)`, and each host has a separate bearer token.
-
-#### Create the database and receiver role in pgAdmin
-
-1. Install PostgreSQL from the downloaded Windows installer and select pgAdmin if the installer offers it. Keep the PostgreSQL server running as a Windows service.
-2. In pgAdmin, connect to the local server and create a database named `tokenlens`.
-3. This checkout already has a private, Git-ignored `central.env` with random local credentials. Use its existing `PGPASSWORD`. On a fresh checkout, copy `central.env.example` to `central.env` and generate a strong password locally with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
-4. Open pgAdmin's Query Tool connected to the `tokenlens` database as the PostgreSQL administrator. In `central/pgadmin-bootstrap.sql`, replace `__COPY_PGPASSWORD_FROM_CENTRAL_ENV__` with the exact `PGPASSWORD` value, then execute the script once. It creates the usage table, indexes, and a restricted receiver role.
-5. In `central.env`, replace the two sample host tokens with distinct random values and add one entry per host. Keep this file private; Git ignores it.
-
-Install the receiver dependencies and run it on loopback:
-
-```powershell
-python -m pip install -r requirements-central.txt
-python -m uvicorn central.server:app --env-file central.env --host 127.0.0.1 --port 8080
-```
-
-Check readiness with `Invoke-RestMethod http://127.0.0.1:8080/health`. PostgreSQL remains on `127.0.0.1:5432`; do not open that port to other machines. Remote host sync needs a TLS reverse proxy in front of the receiver and a publicly trusted HTTPS certificate. The receiver rejects unauthenticated or unknown host IDs and caps each batch at 500 events.
-
-#### Configure host proxies and sync DuckDB
-
-On each host, set its unique ID, matching receiver token, and central HTTPS URL before starting the local proxy:
-
-```powershell
-$env:FINOPS_HOST_ID = "host-01"
-$env:FINOPS_CENTRAL_TOKEN = "<the token configured for host-01>"
-$env:FINOPS_CENTRAL_URL = "https://finops.example.com"
-$env:FINOPS_DUCKDB_PATH = "data/tokenlens_usage.duckdb"
-python scripts/mock_proxy.py
-```
-
-While that proxy is running, flush pending DuckDB rows on the same host with `python scripts/sync_duckdb_to_central.py` (also set `FINOPS_API_TOKEN` in that shell if the local proxy requires it). Schedule the command as often as needed. The local ledger marks rows synced only after PostgreSQL acknowledges the batch; retries are safe.
-
-Inspect per-host totals in pgAdmin or with:
-
-```sql
-SELECT host_id, COUNT(*) AS requests, SUM(total_cost_usd) AS spend_usd
-FROM tokenlens.usage_events
-GROUP BY host_id
-ORDER BY host_id;
-```
-
-The optional `scripts/check_postgres_connection.py` verifies a read-only DuckDB attachment for separately managed PostgreSQL instances; it is not required by the central receiver.
